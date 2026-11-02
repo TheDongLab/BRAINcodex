@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=cQTL_SuSiE_coloc
-#SBATCH --output=/home/zw529/donglab/data/target_ALS/MR/cQTL_SuSiE_coloc.out
-#SBATCH --error=/home/zw529/donglab/data/target_ALS/MR/cQTL_SuSiE_coloc.err
+#SBATCH --output=/home/zw529/donglab/data/answer_ALS/MR/cQTL_SuSiE_coloc.out
+#SBATCH --error=/home/zw529/donglab/data/answer_ALS/MR/cQTL_SuSiE_coloc.err
 #SBATCH --time=08:00:00
 #SBATCH --mem=80G
 #SBATCH --cpus-per-task=4
@@ -15,9 +15,15 @@ command -v plink >/dev/null || { echo "ERROR: PLINK unavailable"; exit 1; }
 command -v Rscript >/dev/null || { echo "ERROR: Rscript unavailable"; exit 1; }
 Rscript -e 'p<-c("data.table","susieR","coloc","ggplot2"); x<-p[!sapply(p,requireNamespace,quietly=TRUE)]; if(length(x)) stop("Missing R packages: ",paste(x,collapse=", "))'
 
-BASE="$HOME/donglab/data/target_ALS"; BFILE="$BASE/QTL/plink/joint_all_chrs_filtered_bed"; RAW="$BASE/QTL/plink/joint_all_chrs_matrixEQTL.raw"
+EXPERIMENT="${EXPERIMENT:-target_ALS}"
+[[ "$EXPERIMENT" == "target_ALS" || "$EXPERIMENT" == "answer_ALS" ]] || { echo "ERROR: EXPERIMENT must be target_ALS or answer_ALS" >&2; exit 1; }
+BASE="$HOME/donglab/data/$EXPERIMENT"; BFILE="$BASE/QTL/plink/joint_all_chrs_filtered_bed"; RAW="$BASE/QTL/plink/joint_all_chrs_matrixEQTL.raw"
 GWAS="$HOME/donglab/references/GWAS/ALS/harmonised/34873335-GCST90027163-MONDO_0004976.h.tsv.gz"; GWAS_ORIG="$HOME/donglab/references/GWAS/ALS/GCST90027163_buildGRCh37.tsv.gz"
-TISSUES=(Cervical_Spinal_Cord Lumbar_Spinal_Cord Motor_Cortex Frontal_Cortex Cerebellum)
+if [[ "$EXPERIMENT" == "answer_ALS" ]]; then
+  TISSUES=(iPSC_Motor_Neuron)
+else
+  TISSUES=(Cervical_Spinal_Cord Lumbar_Spinal_Cord Motor_Cortex Frontal_Cortex Cerebellum)
+fi
 [[ -z "${QTL_TISSUES:-}" ]] || read -r -a TISSUES <<< "$QTL_TISSUES"
 
 CANDIDATE_MODE="global_fdr"   # global_fdr | tissue_fdr | nominal | all
