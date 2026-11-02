@@ -165,7 +165,7 @@ if (nrow(anchor_lookup) > 0) {
     diag_start <- anchor_pos - 500000
     diag_end   <- anchor_pos + 500000
 
-    snp_diag <- snp_raw[snpid %in% snp_loc[chr_clean == chr_num_clean & pos >= diag_start & pos <= diag_end, snpid]
+    snp_diag <- snp_raw[snpid %in% snp_loc[chr_clean == chr_num_clean & pos >= diag_start & pos <= diag_end, snpid]]
     setkey(snp_diag, snpid)
     snp_diag <- snp_diag[snp_loc, nomatch = NULL]
 
