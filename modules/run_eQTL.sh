@@ -198,7 +198,8 @@ fi
 
 # ── Step 3.5: Regional Locus Zoom ─────────────────────────────────────
 if [ "$EXPERIMENT" = "answer_ALS" ]; then
-    echo "[3.5] Skipping regional locus zoom: helper still uses TargetALS paths."
+    echo "[3.5] Generating AnswerALS regional locus zoom plots..."
+    Rscript "$PIPELINE/_eQTL_regional_zoom.R" "iPSC_Motor_Neuron" "$RUN_TYPE"
 elif [ -n "$SUB_DIR" ]; then
     echo "[3.5] Skipping standard regional locus zoom for stratified subfolder runs."
 else
