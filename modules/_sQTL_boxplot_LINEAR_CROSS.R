@@ -23,7 +23,19 @@ snp_loc   <- args[5]
 out_dir   <- args[6]
 tissue    <- args[7]
 
-RAW_FILE <- "/home/zw529/donglab/data/target_ALS/QTL/plink/joint_all_chrs_matrixEQTL.raw"
+# TargetALS remains the default for legacy runs.
+experiment <- Sys.getenv("EXPERIMENT", "target_ALS")
+if (!experiment %in% c("target_ALS", "answer_ALS")) {
+  stop("EXPERIMENT must be target_ALS or answer_ALS.")
+}
+
+RAW_FILE <- file.path(
+  path.expand("~/donglab/data"),
+  experiment,
+  "QTL",
+  "plink",
+  "joint_all_chrs_matrixEQTL.raw"
+)
 
 out_file_std <- file.path(out_dir, paste0(tissue, "_all_sig_sQTL_Interaction_boxplots.pdf"))
 out_file_col <- file.path(out_dir, paste0(tissue, "_all_sig_sQTL_Interaction_boxplots_colored.pdf"))
