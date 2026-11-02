@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=run_sQTL
-#SBATCH --output=/home/zw529/donglab/data/target_ALS/QTL/run_sQTL_%j.out
-#SBATCH --error=/home/zw529/donglab/data/target_ALS/QTL/run_sQTL_%j.err
+#SBATCH --output=/home/zw529/donglab/data/answer_ALS/QTL/run_sQTL_%j.out
+#SBATCH --error=/home/zw529/donglab/data/answer_ALS/QTL/run_sQTL_%j.err
 #SBATCH --time=24:00:00
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=64G
@@ -12,7 +12,13 @@ module load R
 # ── Arguments ─────────────────────────────────────────────────────────
 if [ $# -lt 1 ]; then
     echo "ERROR: Missing tissue argument."
-    echo "Usage: sbatch run_sQTL.sh \"Cerebellum\" [standard|interaction]"
+    echo "Usage: EXPERIMENT=target_ALS|answer_ALS sbatch run_sQTL.sh \"Cerebellum\" [standard|interaction]"
+    exit 1
+fi
+
+EXPERIMENT="${EXPERIMENT:-target_ALS}"
+if [[ "$EXPERIMENT" != "target_ALS" && "$EXPERIMENT" != "answer_ALS" ]]; then
+    echo "[ERROR] EXPERIMENT must be target_ALS or answer_ALS." >&2
     exit 1
 fi
 
@@ -26,37 +32,43 @@ fi
 
 TISSUE_DIR=$(echo "$TISSUE" | tr ' ' '_')
 
+if [[ "$EXPERIMENT" == "answer_ALS" && "$TISSUE_DIR" != "iPSC_Motor_Neuron" ]]; then
+    echo "[ERROR] AnswerALS runner currently supports iPSC_Motor_Neuron only." >&2
+    exit 1
+fi
+
 echo "============================================"
 echo "  Matrix sQTL run for tissue : $TISSUE"
+echo "  Experiment                : $EXPERIMENT"
 echo "  Mode                       : $RUN_TYPE"
 echo "  $(date)"
 echo "============================================"
 
 # ── Paths ─────────────────────────────────────────────────────────────
-BASE=/home/zw529/donglab/data/target_ALS
-PIPELINE=/home/zw529/donglab/pipelines/scripts/QTL
-PLINK=$BASE/QTL/plink
+BASE="/home/zw529/donglab/data/$EXPERIMENT"
+PIPELINE="${QTL_PIPELINE:-/home/zw529/donglab/pipelines/scripts/QTL}"
+PLINK="$BASE/QTL/plink"
 
-INDIR=$BASE/$TISSUE_DIR/sQTL
-COV_FILE=$INDIR/covariates_${TISSUE_DIR}_encoded.txt
+INDIR="$BASE/$TISSUE_DIR/sQTL"
+COV_FILE="$INDIR/covariates_${TISSUE_DIR}_encoded.txt"
 
 if [ "$RUN_TYPE" == "interaction" ]; then
-    OUTDIR=$INDIR/interaction_results
+    OUTDIR="$INDIR/interaction_results"
 else
-    OUTDIR=$INDIR/results
+    OUTDIR="$INDIR/results"
 fi
 
 mkdir -p "$OUTDIR"
 
 # Input matrices
-SNP_FILE=$INDIR/snp_${TISSUE_DIR}.txt
-SPLICING_FILE=$INDIR/splicing_${TISSUE_DIR}.txt
-SPLICING_LOC=$INDIR/splicing_location.txt
-SNP_LOC=$INDIR/snp_location.txt
-BIM=$PLINK/joint_all_chrs_filtered_bed.bim
+SNP_FILE="$INDIR/snp_${TISSUE_DIR}.txt"
+SPLICING_FILE="$INDIR/splicing_${TISSUE_DIR}.txt"
+SPLICING_LOC="$INDIR/splicing_location.txt"
+SNP_LOC="$INDIR/snp_location.txt"
+BIM="$PLINK/joint_all_chrs_filtered_bed.bim"
 
 # Output files
-OUTPUT_PREFIX=$OUTDIR/${TISSUE_DIR}_sQTL
+OUTPUT_PREFIX="$OUTDIR/${TISSUE_DIR}_sQTL"
 CIS_FILE="${OUTPUT_PREFIX}.cis.txt"
 
 FDR_THRESH=0.05
@@ -65,9 +77,9 @@ TOP_N=1000000
 # ── Step 0: Pre-flight & Location Harmonization ───────────────────────
 echo "[0] Verifying file existence and alignment..."
 
-for f in "$SNP_FILE" "$SPLICING_FILE" "$COV_FILE" "$SPLICING_LOC" "$SNP_LOC"; do
-    if [ ! -f "$f" ]; then
-        echo "ERROR: File missing: $f"
+for f in "$SNP_FILE" "$SPLICING_FILE" "$COV_FILE" "$SPLICING_LOC" "$SNP_LOC" "$BIM"; do
+    if [ ! -s "$f" ]; then
+        echo "ERROR: File missing or empty: $f"
         exit 1
     fi
 done
@@ -96,6 +108,16 @@ if [[ "$S_N" -ne "$SPL_N" ]] || [[ "$S_N" -ne "$C_N" ]]; then
     echo "FATAL ERROR: Matrices are not aligned! SNP:$S_N, SPLICING:$SPL_N, COV:$C_N"
     exit 1
 fi
+
+python3 - "$SNP_FILE" "$SPLICING_FILE" "$COV_FILE" <<'PYALIGN'
+import sys
+headers=[]
+for path in sys.argv[1:]:
+    with open(path) as f:
+        headers.append(f.readline().rstrip("\n").split("\t")[1:])
+if not headers[0] or len(set(headers[0])) != len(headers[0]) or not all(h == headers[0] for h in headers):
+    raise SystemExit("Donor IDs/order differ between genotype, splicing, and covariate matrices")
+PYALIGN
 
 # ── Step 1: Run Matrix sQTL ───────────────────────────────────────────
 echo "[1] Running Matrix sQTL..."
@@ -144,10 +166,12 @@ else
 fi
 
 # ── Step 3.5: Regional Locus Zoom ─────────────────────────────────────
-echo "[3.5] Generating regional locus zoom plots..."
-
-Rscript "$PIPELINE/_sQTL_regional_zoom.R" \
-    "$TISSUE_DIR" "$RUN_TYPE"
+if [ "$EXPERIMENT" = "answer_ALS" ]; then
+    echo "[3.5] Skipping regional locus zoom: helper still uses TargetALS paths."
+else
+    echo "[3.5] Generating regional locus zoom plots..."
+    Rscript "$PIPELINE/_sQTL_regional_zoom.R" "$TISSUE_DIR" "$RUN_TYPE"
+fi
 
 # ── Step 4: Boxplots ──────────────────────────────────────────────────
 echo "[4] Generating boxplots for all significant SNPs..."
@@ -170,6 +194,7 @@ fi
 # ── Final Summary ─────────────────────────────────────────────────────
 echo "============================================"
 echo "  Run complete for : $TISSUE (Mode: $RUN_TYPE)"
+echo "  Experiment       : $EXPERIMENT"
 echo "  All outputs saved to: $OUTDIR"
 echo "  $(date)"
 echo "============================================"
