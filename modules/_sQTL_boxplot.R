@@ -78,17 +78,37 @@ message(sprintf("# Pairs to plot: %d", nrow(pairs)))
 message(sprintf("# SNP matrix: %d SNPs x %d samples", nrow(snp_mat), ncol(snp_mat)-1))
 message(sprintf("# Splicing (PSI) matrix: %d junctions x %d samples", nrow(psi_mat), ncol(psi_mat)-1))
 
-# Get the first column name (the row identifier)
-cov_first_col <- names(cov_mat)[1]
+# Determine case/control status.
+sample_ids <- names(psi_mat)[-1]
 
-# Find the 'is_als' row
-als_row <- cov_mat[get(cov_first_col) == "is_als", ]
+if (experiment == "answer_ALS") {
+  status <- ifelse(
+    grepl("^CASE-", sample_ids, ignore.case=TRUE), "CASE",
+    ifelse(grepl("^CTRL-", sample_ids, ignore.case=TRUE), "CTRL", NA_character_)
+  )
 
-if (nrow(als_row) == 0) {
-  message("# WARNING: 'is_als' row not found. Defaulting to standard purple points.")
-  als_vals <- rep(0, ncol(cov_mat) - 1)
+  if (anyNA(status)) {
+    stop(
+      "Could not assign AnswerALS CASE/CTRL status for: ",
+      paste(sample_ids[is.na(status)], collapse=", ")
+    )
+  }
+
+  als_vals <- as.integer(status == "CASE")
+  status_labels <- c("CASE", "CTRL")
 } else {
-  als_vals <- as.numeric(unlist(als_row[, -1, with=FALSE], use.names=FALSE))
+  # TargetALS keeps its existing is_als covariate behavior.
+  cov_first_col <- names(cov_mat)[1]
+  als_row <- cov_mat[get(cov_first_col) == "is_als", ]
+
+  if (nrow(als_row) == 0) {
+    message("# WARNING: 'is_als' row not found. Defaulting to standard purple points.")
+    als_vals <- rep(0, ncol(cov_mat) - 1)
+  } else {
+    als_vals <- as.numeric(unlist(als_row[, -1, with=FALSE], use.names=FALSE))
+  }
+
+  status_labels <- c("ALS", "Control")
 }
 
 p_colors <- ifelse(als_vals > 0.5, "red", "#9932CC")
@@ -175,7 +195,7 @@ run_plotting <- function(pdf_path, use_status_colors = FALSE) {
                pch=df$p_pch, col=df$p_col, cex=df$p_cex)
 
         if (use_status_colors) {
-          legend("topleft", legend=c("ALS", "Control"), col=c("red", "#9932CC"),
+          legend("topleft", legend=status_labels, col=c("red", "#9932CC"),
                  pch=c(16,18), pt.cex=c(0.7,1.1), bty="n", cex=0.8)
         }
 
@@ -193,7 +213,7 @@ run_plotting <- function(pdf_path, use_status_colors = FALSE) {
                pch=df$p_pch, col=df$p_col, cex=df$p_cex)
 
         if (use_status_colors) {
-          legend("topleft", legend=c("ALS", "Control"), col=c("red", "#9932CC"),
+          legend("topleft", legend=status_labels, col=c("red", "#9932CC"),
                  pch=c(16,18), pt.cex=c(0.7,1.1), bty="n", cex=0.8)
         }
 
@@ -211,7 +231,7 @@ run_plotting <- function(pdf_path, use_status_colors = FALSE) {
                pch=df$p_pch, col=df$p_col, cex=df$p_cex)
 
         if (use_status_colors) {
-          legend("topleft", legend=c("ALS", "Control"), col=c("red", "#9932CC"),
+          legend("topleft", legend=status_labels, col=c("red", "#9932CC"),
                  pch=c(16,18), pt.cex=c(0.7,1.1), bty="n", cex=0.8)
         }
 
