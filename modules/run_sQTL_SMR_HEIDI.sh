@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=sQTL_SMR_HEIDI
-#SBATCH --output=/home/zw529/donglab/data/target_ALS/MR/sQTL_SMR_HEIDI.out
-#SBATCH --error=/home/zw529/donglab/data/target_ALS/MR/sQTL_SMR_HEIDI.err
+#SBATCH --output=/home/zw529/donglab/data/answer_ALS/MR/sQTL_SMR_HEIDI_5e8.out
+#SBATCH --error=/home/zw529/donglab/data/answer_ALS/MR/sQTL_SMR_HEIDI_5e8.err
 #SBATCH --time=04:00:00
 #SBATCH --mem=56G
 #SBATCH --cpus-per-task=4
@@ -12,11 +12,17 @@ module load PLINK/1.9b_7.11-x86_64
 
 QTL_LABEL="sQTL"
 SMR="$HOME/donglab/pipelines/modules/smr/smr-1.4.2-linux-x86_64/smr"
-BASE="$HOME/donglab/data/target_ALS"; GLOBAL="$BASE/MR/sQTL_SMR_HEIDI"
+EXPERIMENT="${EXPERIMENT:-target_ALS}"
+[[ "$EXPERIMENT" == "target_ALS" || "$EXPERIMENT" == "answer_ALS" ]] || { echo "ERROR: EXPERIMENT must be target_ALS or answer_ALS" >&2; exit 1; }
+BASE="$HOME/donglab/data/$EXPERIMENT"; GLOBAL="$BASE/MR/sQTL_SMR_HEIDI"
 BFILE="$BASE/QTL/plink/joint_all_chrs_filtered_bed"; RAW="$BASE/QTL/plink/joint_all_chrs_matrixEQTL.raw"; BIM="$BFILE.bim"
 GWAS_DIR="$HOME/donglab/references/GWAS/ALS"; GWAS="$GWAS_DIR/harmonised/34873335-GCST90027163-MONDO_0004976.h.tsv.gz"
 GWAS_ORIG="$GWAS_DIR/GCST90027163_buildGRCh37.tsv.gz"; GWAS_MA="$GWAS_DIR/ALS_GRCh38_SMR.ma"
-TISSUES=(Cervical_Spinal_Cord Lumbar_Spinal_Cord Motor_Cortex Frontal_Cortex Cerebellum)
+if [[ "$EXPERIMENT" == "answer_ALS" ]]; then
+  TISSUES=(iPSC_Motor_Neuron)
+else
+  TISSUES=(Cervical_Spinal_Cord Lumbar_Spinal_Cord Motor_Cortex Frontal_Cortex Cerebellum)
+fi
 [[ -z "${QTL_TISSUES:-}" ]] || read -r -a TISSUES <<< "$QTL_TISSUES"
 
 PEQTL_SMR=5e-8; PEQTL_HEIDI=1.57e-3; HEIDI_PASS=0.05
