@@ -21,9 +21,21 @@ cov_file  <- args[4]
 out_dir   <- args[5]
 tissue    <- args[6]
 
+# TargetALS remains the default for legacy runs.
+experiment <- Sys.getenv("EXPERIMENT", "target_ALS")
+if (!experiment %in% c("target_ALS", "answer_ALS")) {
+  stop("EXPERIMENT must be target_ALS or answer_ALS.")
+}
+
 # Existing files needed only to orient 0/1/2 as ALT dosage
-snp_loc  <- file.path(dirname(snp_file), "snp_location.txt")
-RAW_FILE <- "/home/zw529/donglab/data/target_ALS/QTL/plink/joint_all_chrs_matrixEQTL.raw"
+snp_loc <- file.path(dirname(snp_file), "snp_location.txt")
+RAW_FILE <- file.path(
+  path.expand("~/donglab/data"),
+  experiment,
+  "QTL",
+  "plink",
+  "joint_all_chrs_matrixEQTL.raw"
+)
 
 out_file_std <- file.path(out_dir, paste0(tissue, "_all_sig_cQTL_boxplots.pdf"))
 out_file_col <- file.path(out_dir, paste0(tissue, "_all_sig_cQTL_boxplots_colored.pdf"))
@@ -64,13 +76,40 @@ alleles <- merge(
 message(sprintf("# Allele mappings recovered: %d / %d SNPs",
                 sum(!is.na(alleles$counted)), nrow(alleles)))
 
-# Process covariates
-cov_first_col <- names(cov_mat)[1]
-als_row <- cov_mat[get(cov_first_col) == "is_als", ]
-if (nrow(als_row) == 0) {
-  als_vals <- rep(0, ncol(cov_mat) - 1)
+# Determine case/control status.
+sample_ids <- names(circ_mat)[-1]
+
+if (experiment == "answer_ALS") {
+  status <- ifelse(
+    grepl("^CASE-", sample_ids, ignore.case=TRUE), "CASE",
+    ifelse(grepl("^CTRL-", sample_ids, ignore.case=TRUE), "CTRL", NA_character_)
+  )
+
+  if (anyNA(status)) {
+    stop(
+      "Could not assign AnswerALS CASE/CTRL status for: ",
+      paste(sample_ids[is.na(status)], collapse=", ")
+    )
+  }
+
+  als_vals <- as.integer(status == "CASE")
+  status_labels <- c("CASE", "CTRL")
 } else {
-  als_vals <- as.numeric(unlist(als_row[, -1, with=FALSE], use.names=FALSE))
+  # TargetALS keeps its existing is_als covariate behavior.
+  cov_first_col <- names(cov_mat)[1]
+  als_row <- cov_mat[get(cov_first_col) == "is_als", ]
+
+  if (nrow(als_row) == 0) {
+    als_vals <- rep(0, ncol(cov_mat) - 1)
+  } else {
+    als_vals <- as.numeric(unlist(als_row[, -1, with=FALSE], use.names=FALSE))
+  }
+
+  status_labels <- c("ALS", "Control")
+}
+
+if (length(als_vals) != length(sample_ids)) {
+  stop("Case/control status count does not match the number of circRNA-matrix samples.")
 }
 
 p_colors <- ifelse(als_vals > 0.5, "red", "#9932CC")
@@ -150,7 +189,7 @@ run_plotting <- function(pdf_path, use_status_colors = FALSE) {
                 main=paste0("Additive Model\n(p = ", get_p(circ_percent ~ SNP, df), ")"))
         points(jitter(as.numeric(df$SNP_f), amount=0.15), df$circ_percent,
                pch=df$p_pch, col=df$p_col, cex=df$p_cex)
-        if (use_status_colors) legend("topleft", legend=c("ALS", "Control"), col=c("red", "#9932CC"),
+        if (use_status_colors) legend("topleft", legend=status_labels, col=c("red", "#9932CC"),
                                       pch=c(16,18), pt.cex=c(0.7,1.1), bty="n", cex=0.8)
 
         # Dominant Model
@@ -164,7 +203,7 @@ run_plotting <- function(pdf_path, use_status_colors = FALSE) {
                 main=paste0("Dominant Model\n(p = ", get_p(circ_percent ~ dom_val, df), ")"))
         points(jitter(as.numeric(df$dom_f), amount=0.15), df$circ_percent,
                pch=df$p_pch, col=df$p_col, cex=df$p_cex)
-        if (use_status_colors) legend("topleft", legend=c("ALS", "Control"), col=c("red", "#9932CC"),
+        if (use_status_colors) legend("topleft", legend=status_labels, col=c("red", "#9932CC"),
                                       pch=c(16,18), pt.cex=c(0.7,1.1), bty="n", cex=0.8)
 
         # Recessive Model
@@ -178,7 +217,7 @@ run_plotting <- function(pdf_path, use_status_colors = FALSE) {
                 main=paste0("Recessive Model\n(p = ", get_p(circ_percent ~ rec_val, df), ")"))
         points(jitter(as.numeric(df$rec_f), amount=0.15), df$circ_percent,
                pch=df$p_pch, col=df$p_col, cex=df$p_cex)
-        if (use_status_colors) legend("topleft", legend=c("ALS", "Control"), col=c("red", "#9932CC"),
+        if (use_status_colors) legend("topleft", legend=status_labels, col=c("red", "#9932CC"),
                                       pch=c(16,18), pt.cex=c(0.7,1.1), bty="n", cex=0.8)
 
         mtext(paste("circRNA:", c_id, "| SNP:", S, "| REF:", a$ref[1], "| ALT:", a$alt[1]),
