@@ -77,15 +77,34 @@ message(sprintf("# Pairs to plot: %d", nrow(pairs)))
 message(sprintf("# SNP matrix: %d SNPs x %d samples", nrow(snp_mat), ncol(snp_mat)-1))
 message(sprintf("# Splicing (PSI) matrix: %d junctions x %d samples", nrow(psi_mat), ncol(psi_mat)-1))
 
-# Process clinical interaction covariate status
-cov_first_col <- names(cov_mat)[1]
-als_row <- cov_mat[get(cov_first_col) == "is_als", ]
+# Determine case/control status.
+sample_ids <- names(psi_mat)[-1]
 
-if (nrow(als_row) == 0) {
-  message("# WARNING: 'is_als' row not found in covariates file! Defaulting to Control status.")
-  als_vals <- rep(0, ncol(cov_mat) - 1)
+if (experiment == "answer_ALS") {
+  status <- ifelse(
+    grepl("^CASE-", sample_ids, ignore.case=TRUE), "ALS",
+    ifelse(grepl("^CTRL-", sample_ids, ignore.case=TRUE), "Control", NA_character_)
+  )
+
+  if (anyNA(status)) {
+    stop(
+      "Could not assign AnswerALS CASE/CTRL status for: ",
+      paste(sample_ids[is.na(status)], collapse=", ")
+    )
+  }
+
+  als_vals <- as.integer(status == "ALS")
 } else {
-  als_vals <- as.numeric(unlist(als_row[, -1, with=FALSE], use.names=FALSE))
+  # TargetALS keeps its existing is_als covariate behavior.
+  cov_first_col <- names(cov_mat)[1]
+  als_row <- cov_mat[get(cov_first_col) == "is_als", ]
+
+  if (nrow(als_row) == 0) {
+    message("# WARNING: 'is_als' row not found in covariates file! Defaulting to Control status.")
+    als_vals <- rep(0, ncol(cov_mat) - 1)
+  } else {
+    als_vals <- as.numeric(unlist(als_row[, -1, with=FALSE], use.names=FALSE))
+  }
 }
 
 # Jitter plotting definitions
