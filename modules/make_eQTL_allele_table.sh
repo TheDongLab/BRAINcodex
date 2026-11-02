@@ -11,11 +11,21 @@ module --force purge
 command -v python3 >/dev/null || { echo "ERROR: python3 not found"; exit 1; }
 python3 -c 'import pandas' 2>/dev/null || { echo "ERROR: pandas unavailable"; exit 1; }
 
-BASE="$HOME/donglab/data/target_ALS"; PLINK_DIR="$BASE/QTL/plink"
+# Set EXPERIMENT=target_ALS or answer_ALS; TargetALS remains the default.
+EXPERIMENT="${EXPERIMENT:-target_ALS}"
+[[ "$EXPERIMENT" == "target_ALS" || "$EXPERIMENT" == "answer_ALS" ]] || { echo "ERROR: EXPERIMENT must be target_ALS or answer_ALS" >&2; exit 1; }
+BASE="$HOME/donglab/data/$EXPERIMENT"; PLINK_DIR="$BASE/QTL/plink"
 BFILE="$PLINK_DIR/joint_all_chrs_filtered_bed"; RAW="$PLINK_DIR/joint_all_chrs_matrixEQTL.raw"; BIM="$BFILE.bim"
 GWAS="$HOME/donglab/references/GWAS/ALS/harmonised/34873335-GCST90027163-MONDO_0004976.h.tsv.gz"
-OUTROOT="$HOME/donglab/data/GCST90027163/GWAS/eQTL_harmonization"; SUMMARY="$OUTROOT/all_tissues_SNP_first_summary.tsv"
-TISSUES=(Cervical_Spinal_Cord Lumbar_Spinal_Cord Motor_Cortex Frontal_Cortex Cerebellum); MIN_F=10
+if [[ "$EXPERIMENT" == "target_ALS" ]]; then
+    OUTROOT="$HOME/donglab/data/GCST90027163/GWAS/eQTL_harmonization"
+    TISSUES=(Cervical_Spinal_Cord Lumbar_Spinal_Cord Motor_Cortex Frontal_Cortex Cerebellum)
+else
+    OUTROOT="$BASE/MR/eQTL_harmonization"
+    TISSUES=(iPSC_Motor_Neuron)
+fi
+SUMMARY="$OUTROOT/all_tissues_SNP_first_summary.tsv"
+MIN_F=10
 
 mkdir -p "$OUTROOT"
 for f in "$RAW" "$BIM" "$GWAS"; do [[ -s "$f" ]] || { echo "ERROR: missing/empty: $f"; exit 1; }; done
