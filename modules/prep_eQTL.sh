@@ -8,6 +8,10 @@
 
 set -euo pipefail
 
+module purge
+unset PYTHONPATH
+module load Python/3.12.3-GCCcore-13.3.0
+module load Python-bundle-PyPI/2024.06-GCCcore-13.3.0
 module load BCFtools
 
 if [ "$#" -lt 1 ]; then
