@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=run_cQTL
-#SBATCH --output=/home/zw529/donglab/data/target_ALS/QTL/run_cQTL_%j.out
-#SBATCH --error=/home/zw529/donglab/data/target_ALS/QTL/run_cQTL_%j.err
+#SBATCH --output=/home/zw529/donglab/data/answer_ALS/QTL/run_cQTL_%j.out
+#SBATCH --error=/home/zw529/donglab/data/answer_ALS/QTL/run_cQTL_%j.err
 #SBATCH --time=5-24:00:00
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=64G
