@@ -24,6 +24,7 @@ fi
 
 TISSUE="$1"
 RUN_TYPE="${2:-standard}"
+SUB_DIR="${SUB_DIR:-}"
 
 if [[ "$RUN_TYPE" != "standard" && "$RUN_TYPE" != "interaction" ]]; then
     echo "ERROR: RUN_TYPE must be 'standard' or 'interaction'."
@@ -84,18 +85,46 @@ for f in "$SNP_FILE" "$SPLICING_FILE" "$COV_FILE" "$SPLICING_LOC" "$SNP_LOC" "$B
     fi
 done
 
-echo "[0.1] Standardizing chromosome labels in splicing location file..."
-
 SPLICING_LOC_BAK="${SPLICING_LOC}.bak"
-
-if [ ! -f "$SPLICING_LOC_BAK" ]; then
+if [[ ! -f "$SPLICING_LOC_BAK" ]]; then
     cp "$SPLICING_LOC" "$SPLICING_LOC_BAK"
 fi
 
-sed -E 's/\t(chr[0-9XY]+):[\+\-]\t/\t\1\t/g' \
-    "$SPLICING_LOC_BAK" > "$SPLICING_LOC"
+if [[ "$EXPERIMENT" == "answer_ALS" ]]; then
+    echo "[0.1] Matching splicing chromosome labels to SNP location labels..."
 
-echo "      -> Chromosome strings cleaned in $SPLICING_LOC"
+    SNP_CHR_STYLE=$(awk -F'\t' 'NR>1 && $2!="" {if ($2 ~ /^chr/) print "chr"; else print "plain"; exit}' "$SNP_LOC")
+    if [[ -z "$SNP_CHR_STYLE" ]]; then
+        echo "[ERROR] Could not determine chromosome naming from $SNP_LOC" >&2
+        exit 1
+    fi
+
+    awk -F'\t' -v OFS='\t' -v style="$SNP_CHR_STYLE" '
+        NR==1 { print; next }
+        {
+            sub(/^chr/, "", $2)
+            if (style == "chr") $2 = "chr" $2
+            print
+        }
+    ' "$SPLICING_LOC_BAK" > "${SPLICING_LOC}.tmp"
+    mv "${SPLICING_LOC}.tmp" "$SPLICING_LOC"
+
+    SHARED_CHR=$(comm -12 \
+        <(awk -F'\t' 'NR>1 {print $2}' "$SNP_LOC" | sort -u) \
+        <(awk -F'\t' 'NR>1 {print $2}' "$SPLICING_LOC" | sort -u) | wc -l)
+
+    echo "      -> Shared chromosome labels: $SHARED_CHR"
+    if [[ "$SHARED_CHR" -eq 0 ]]; then
+        echo "[ERROR] SNP and splicing location files have no matching chromosome labels." >&2
+        exit 1
+    fi
+else
+    # Preserve the existing TargetALS location-label cleanup.
+    echo "[0.1] Standardizing chromosome labels in splicing location file..."
+    sed -E 's/\t(chr[0-9XY]+):([+-])\t/\t\1\t/g' \
+        "$SPLICING_LOC_BAK" > "$SPLICING_LOC"
+    echo "      -> Chromosome strings cleaned in $SPLICING_LOC"
+fi
 
 # Alignment guard
 S_N=$(head -n 1 "$SNP_FILE" | awk -F'\t' '{print NF-1}')
@@ -111,12 +140,20 @@ fi
 
 python3 - "$SNP_FILE" "$SPLICING_FILE" "$COV_FILE" <<'PYALIGN'
 import sys
-headers=[]
+
+headers = []
 for path in sys.argv[1:]:
     with open(path) as f:
         headers.append(f.readline().rstrip("\n").split("\t")[1:])
-if not headers[0] or len(set(headers[0])) != len(headers[0]) or not all(h == headers[0] for h in headers):
-    raise SystemExit("Donor IDs/order differ between genotype, splicing, and covariate matrices")
+
+if (
+    not headers[0]
+    or len(set(headers[0])) != len(headers[0])
+    or not all(header == headers[0] for header in headers)
+):
+    raise SystemExit(
+        "Donor IDs/order differ between genotype, splicing, and covariate matrices"
+    )
 PYALIGN
 
 # ── Step 1: Run Matrix sQTL ───────────────────────────────────────────
@@ -168,12 +205,12 @@ fi
 # ── Step 3.5: Regional Locus Zoom ─────────────────────────────────────
 if [ "$EXPERIMENT" = "answer_ALS" ]; then
     echo "[3.5] Generating AnswerALS regional locus zoom plots..."
-    Rscript "$PIPELINE/_cQTL_regional_zoom.R" "iPSC_Motor_Neuron" "$RUN_TYPE"
+    Rscript "$PIPELINE/_sQTL_regional_zoom.R" "$TISSUE_DIR" "$RUN_TYPE"
 elif [ -n "$SUB_DIR" ]; then
     echo "[3.5] Skipping standard regional locus zoom for stratified subfolder runs."
 else
     echo "[3.5] Generating regional locus zoom plots..."
-    Rscript "$PIPELINE/_cQTL_regional_zoom.R" "$TISSUE_DIR" "$RUN_TYPE"
+    Rscript "$PIPELINE/_sQTL_regional_zoom.R" "$TISSUE_DIR" "$RUN_TYPE"
 fi
 
 # ── Step 4: Boxplots ──────────────────────────────────────────────────
