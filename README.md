@@ -1,4 +1,12 @@
-![RBAINcode overview](BRAINcode.overview.png)
+## TOADD
+0. add a schematic for all composed analysis
+1. add scRNAseq.pipeline.sh in the main and corresponding scripts in ./module
+2. add scATACseq.pipeline.sh in the main and corresponding scripts in ./module
+3. add scMultiome.pipeline.sh in the main and corresponding scripts in ./module
+4. add spatialTx.pipeline.sh in the main and corresponding scripts in ./module
+5. add wgs.pipeline.sh in the main and corresponding scripts in ./module
+6. add ./downstream and move/add downstream integrative analysis there, e.g. eQTL, DE, etc. 
+
 
 File naming convention
 ---------------
