@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=cQTL_MR
-#SBATCH --output=/home/zw529/donglab/data/target_ALS/MR/cQTL_MR.out
-#SBATCH --error=/home/zw529/donglab/data/target_ALS/MR/cQTL_MR.err
+#SBATCH --output=/home/zw529/donglab/data/answer_ALS/MR/cQTL_MR.out
+#SBATCH --error=/home/zw529/donglab/data/answer_ALS/MR/cQTL_MR.err
 #SBATCH --time=02:00:00
 #SBATCH --mem=16G
 #SBATCH --cpus-per-task=2
@@ -11,9 +11,22 @@ module --force purge
 command -v python3 >/dev/null || { echo "ERROR: python3 not found"; exit 1; }
 python3 -c 'import pandas,numpy' 2>/dev/null || { echo "ERROR: pandas/numpy unavailable"; exit 1; }
 
-BASE="$HOME/donglab/data/target_ALS"; ROOT="$HOME/donglab/references/GWAS/ALS/cQTL_harmonization"; GLOBAL="$BASE/MR"
-TISSUES=(Cervical_Spinal_Cord Lumbar_Spinal_Cord Motor_Cortex Frontal_Cortex Cerebellum)
+# Set EXPERIMENT=target_ALS or answer_ALS. TargetALS is the legacy default.
+EXPERIMENT="${EXPERIMENT:-target_ALS}"
+[[ "$EXPERIMENT" == "target_ALS" || "$EXPERIMENT" == "answer_ALS" ]] || { echo "ERROR: EXPERIMENT must be target_ALS or answer_ALS" >&2; exit 1; }
+BASE="$HOME/donglab/data/$EXPERIMENT"; GLOBAL="$BASE/MR"
+if [[ "$EXPERIMENT" == "target_ALS" ]]; then
+    ROOT="$HOME/donglab/references/GWAS/ALS/cQTL_harmonization"
+    TISSUES=(Cervical_Spinal_Cord Lumbar_Spinal_Cord Motor_Cortex Frontal_Cortex Cerebellum)
+else
+    # AnswerALS MR-ready inputs must be harmonized from AnswerALS QTL results.
+    # Supply their root explicitly; never reuse TargetALS harmonized input by accident.
+    ROOT="${MR_INPUT_ROOT:-}"
+    [[ -n "$ROOT" ]] || { echo "ERROR: set MR_INPUT_ROOT to the AnswerALS cQTL MR-ready input root" >&2; exit 1; }
+    TISSUES=(iPSC_Motor_Neuron)
+fi
 [[ -z "${QTL_TISSUES:-}" ]] || read -r -a TISSUES <<< "$QTL_TISSUES"
+[[ -d "$ROOT" ]] || { echo "ERROR: MR input root does not exist: $ROOT" >&2; exit 1; }
 MIN_F=10
 export BASE ROOT GLOBAL MIN_F TISSUE_LIST="${TISSUES[*]}"
 
