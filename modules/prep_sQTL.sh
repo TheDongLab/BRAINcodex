@@ -36,6 +36,8 @@ else
     [[ "$TISSUE_DIR" == iPSC_Motor_Neuron ]] || { echo "[ERROR] AnswerALS branch supports iPSC_Motor_Neuron only." >&2; exit 1; }
     OUTDIR="$BASE/iPSC_Motor_Neuron/sQTL"
     METADATA_CSV="$BASE/aals_dataportal_datatable.csv"
+    BREAKDOWN_TSV=""
+    COV_FILE=""
     SEX_MISMATCH_FILE="$BASE/iPSC_Motor_Neuron/eQTL/potential_sex_mismatches.txt"
     SPLICING_LOC_SRC="$OUTDIR/tmp_splicing_events_hg38.bed"
 fi
