@@ -14,15 +14,14 @@ python3 -c 'import pandas,numpy' 2>/dev/null || { echo "ERROR: pandas/numpy unav
 # Set EXPERIMENT=target_ALS or answer_ALS. TargetALS is the legacy default.
 EXPERIMENT="${EXPERIMENT:-target_ALS}"
 [[ "$EXPERIMENT" == "target_ALS" || "$EXPERIMENT" == "answer_ALS" ]] || { echo "ERROR: EXPERIMENT must be target_ALS or answer_ALS" >&2; exit 1; }
-BASE="$HOME/donglab/data/$EXPERIMENT"; GLOBAL="$BASE/MR"
+
+BASE="$HOME/donglab/data/$EXPERIMENT"
+GLOBAL="$BASE/MR"
+ROOT="$HOME/donglab/data/GCST90027163/GWAS/cQTL_harmonization"
+
 if [[ "$EXPERIMENT" == "target_ALS" ]]; then
-    ROOT="$HOME/donglab/references/GWAS/ALS/cQTL_harmonization"
     TISSUES=(Cervical_Spinal_Cord Lumbar_Spinal_Cord Motor_Cortex Frontal_Cortex Cerebellum)
 else
-    # AnswerALS MR-ready inputs must be harmonized from AnswerALS QTL results.
-    # Supply their root explicitly; never reuse TargetALS harmonized input by accident.
-    ROOT="${MR_INPUT_ROOT:-}"
-    [[ -n "$ROOT" ]] || { echo "ERROR: set MR_INPUT_ROOT to the AnswerALS cQTL MR-ready input root" >&2; exit 1; }
     TISSUES=(iPSC_Motor_Neuron)
 fi
 [[ -z "${QTL_TISSUES:-}" ]] || read -r -a TISSUES <<< "$QTL_TISSUES"
