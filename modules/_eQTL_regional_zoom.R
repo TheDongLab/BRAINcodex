@@ -18,7 +18,13 @@ if (length(args) >= 2) {
   run_type <- "standard"
 }
 
-message(paste("## Running dynamic regional zoom plots for tissue:", tissue, paste0("(", run_type, " mode)")))
+# TargetALS remains the default for legacy runs.
+experiment <- Sys.getenv("EXPERIMENT", "target_ALS")
+if (!experiment %in% c("target_ALS", "answer_ALS")) {
+  stop("EXPERIMENT must be target_ALS or answer_ALS.", call. = FALSE)
+}
+
+message(paste("## Running dynamic regional zoom plots for tissue:", tissue, paste0("(", run_type, " mode; ", experiment, ")")))
 
 # Target window setup for Plot 1 & Plot 2
 target_chr <- "17"
@@ -31,7 +37,13 @@ chr_label_full  <- paste0("chr", chr_num_clean)
 x_label_dynamic <- sprintf("Chromosome %s Position (Mb)", chr_num_clean)
 
 # Base directory path setup
-base_dir <- paste0("~/donglab/data/target_ALS/", tissue, if (circ_mode) "/circ_eQTL/" else "/eQTL/")
+base_dir <- path.expand(file.path(
+  "~/donglab/data",
+  experiment,
+  tissue,
+  if (circ_mode) "circ_eQTL" else "eQTL"
+))
+base_dir <- paste0(base_dir, "/")
 
 # Dynamically set results folder depending on the run type
 if (run_type == "interaction") {
@@ -84,14 +96,14 @@ snp_zoom[, color_cat := ifelse(geneid == top_gene & `p-value` <= 0.05, "Top Gene
 extreme_hits <- lead_zoom[order(-log10p)][1:min(3, .N)]
 
 p1 <- ggplot() +
-    geom_point(data = snp_zoom[color_cat == "Other/Background"], aes(x = pos / 1e6, y = log10p), 
+    geom_point(data = snp_zoom[color_cat == "Other/Background"], aes(x = pos / 1e6, y = log10p),
                colour = "#B0B0B0", size = 1.0, alpha = 0.4) +
-    geom_point(data = snp_zoom[color_cat == "Top Gene Locus"], aes(x = pos / 1e6, y = log10p), 
+    geom_point(data = snp_zoom[color_cat == "Top Gene Locus"], aes(x = pos / 1e6, y = log10p),
                colour = "#E41A1C", size = 1.4, alpha = 0.8) +
-    geom_point(data = lead_zoom, aes(x = pos / 1e6, y = log10p), 
+    geom_point(data = lead_zoom, aes(x = pos / 1e6, y = log10p),
                shape = 18, size = 3.5, colour = "black") +
     geom_hline(yintercept = 5, linetype = "dashed", colour = "grey40", linewidth = 0.5) +
-    geom_text_repel(data = extreme_hits, aes(x = pos / 1e6, y = log10p, label = geneid), 
+    geom_text_repel(data = extreme_hits, aes(x = pos / 1e6, y = log10p, label = geneid),
                     size = 3.5, colour = "black", fontface = "bold", box.padding = 0.5) +
     scale_x_continuous(limits = c(start_pos/1e6, end_pos/1e6), expand = c(0.01, 0.01)) +
     labs(title = sprintf("%s Regional cis-eQTL Zoom (All Variants)", gsub("_", " ", tissue)),
@@ -117,15 +129,15 @@ p2 <- ggplot(data = lead_snps_per_gene, aes(x = pos / 1e6, y = log10p)) +
     geom_hline(yintercept = 5, linetype = "dashed", colour = "grey40", linewidth = 0.5) +
     geom_point(aes(colour = status), size = 4.0, alpha = 0.9) +
     scale_colour_manual(values = c("Primary Locus Driver" = "#E41A1C", "Secondary Target Gene" = "#377EB8")) +
-    geom_text_repel(aes(label = geneid), size = 3.2, fontface = "bold", 
+    geom_text_repel(aes(label = geneid), size = 3.2, fontface = "bold",
                     box.padding = 0.4, max.overlaps = 20, cluster_groups = FALSE) +
     scale_x_continuous(limits = c(start_pos/1e6, end_pos/1e6), expand = c(0.02, 0.02)) +
     labs(title = sprintf("%s Lead eQTL Variant Summary", gsub("_", " ", tissue)),
          subtitle = sprintf("Pruned view: Showing top peak variants per unique gene structure | Region: %s:%.2f-%.2f Mb", chr_label_full, start_pos/1e6, end_pos/1e6),
          x = x_label_dynamic, y = expression(-log[10](p-value))) +
-    theme_bw() + 
-    theme(panel.grid.minor = element_blank(), 
-          legend.position = "top", 
+    theme_bw() +
+    theme(panel.grid.minor = element_blank(),
+          legend.position = "top",
           legend.title = element_blank())
 
 out_file2 <- paste0(results_dir, tissue, "_eQTL.lead_snps_summary.png")
@@ -146,21 +158,21 @@ if (nrow(anchor_lookup) > 0) {
     anchor_pos <- anchor_lookup[1, pos]
     diag_start <- anchor_pos - 500000
     diag_end   <- anchor_pos + 500000
-    
+
     snp_diag <- snp_raw[snpid %in% snp_loc[chr_clean == chr_num_clean & pos >= diag_start & pos <= diag_end, snpid]]
     setkey(snp_diag, snpid)
     snp_diag <- snp_diag[snp_loc, nomatch = NULL]
-    
+
     sig_genes <- unique(snp_diag[log10p >= 5, geneid])
     snp_diag[, color_group := ifelse(geneid %in% sig_genes & log10p >= 5, geneid, "Background / Non-Sig")]
-    
+
     diag_leads <- lead_raw[snpid %in% snp_diag$snpid & geneid %in% sig_genes]
     diag_leads <- diag_leads[snp_loc, nomatch = NULL, on = "snpid"]
-    
+
     unique_sig_genes <- sort(setdiff(unique(snp_diag$color_group), "Background / Non-Sig"))
     color_palette <- setNames(scales::hue_pal()(length(unique_sig_genes)), unique_sig_genes)
     color_palette["Background / Non-Sig"] <- "#B0B0B0"
-    
+
     p3 <- ggplot() +
         geom_point(data = snp_diag[color_group == "Background / Non-Sig"], aes(x = pos / 1e6, y = log10p),
                    colour = "#B0B0B0", size = 1.0, alpha = 0.3) +
@@ -175,7 +187,7 @@ if (nrow(anchor_lookup) > 0) {
         scale_colour_manual(values = color_palette) +
         scale_x_continuous(limits = c(diag_start / 1e6, diag_end / 1e6), expand = c(0.01, 0.01)) +
         labs(title = sprintf("Gene Diagnostic Regional Zoom - %s eQTL", gsub("_", " ", tissue)),
-             subtitle = sprintf("Region: Locus window around %s (%s:%.2f-%.2f Mb) | Colored by unique significant target gene structure", 
+             subtitle = sprintf("Region: Locus window around %s (%s:%.2f-%.2f Mb) | Colored by unique significant target gene structure",
                                 anchor_snp, chr_label_full, diag_start/1e6, diag_end/1e6),
              x = x_label_dynamic, y = expression(-log[10](p-value))) +
         theme_bw() +
@@ -184,7 +196,7 @@ if (nrow(anchor_lookup) > 0) {
               legend.title = element_blank(),
               legend.text = element_text(size = 8)) +
         guides(colour = guide_legend(ncol = 4, byrow = TRUE))
-        
+
     out_file3 <- paste0(results_dir, tissue, "_eQTL.gene_diagnostics.png")
     png(out_file3, width = 11, height = 7, units = "in", res = 300)
     print(p3)
