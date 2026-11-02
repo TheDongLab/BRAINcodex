@@ -74,14 +74,35 @@ alleles <- merge(snp_map[, .(snpid, chr_key, pos_key)],
 message(sprintf("# Allele mappings recovered: %d / %d SNPs",
                 sum(!is.na(alleles$counted)), nrow(alleles)))
 
-# ── Process covariates ────────────────────────────────────────────────
-cov_first_col <- names(cov_mat)[1]
-als_row <- cov_mat[get(cov_first_col) == "is_als", ]
+# ── Process case/control status ───────────────────────────────────────
+sample_ids <- names(expr_mat)[-1]
 
-if (nrow(als_row) == 0) {
-  als_vals <- rep(0, ncol(cov_mat) - 1)
+if (experiment == "answer_ALS") {
+  status <- ifelse(
+    grepl("^CASE-", sample_ids, ignore.case=TRUE), "CASE",
+    ifelse(grepl("^CTRL-", sample_ids, ignore.case=TRUE), "CTRL", NA_character_)
+  )
+
+  if (anyNA(status)) {
+    stop(
+      "Could not assign AnswerALS CASE/CTRL status for: ",
+      paste(sample_ids[is.na(status)], collapse=", ")
+    )
+  }
+
+  als_vals <- as.integer(status == "CASE")
+  status_labels <- c("CASE", "CTRL")
 } else {
-  als_vals <- as.numeric(unlist(als_row[, -1, with=FALSE], use.names=FALSE))
+  cov_first_col <- names(cov_mat)[1]
+  als_row <- cov_mat[get(cov_first_col) == "is_als", ]
+
+  if (nrow(als_row) == 0) {
+    als_vals <- rep(0, ncol(cov_mat) - 1)
+  } else {
+    als_vals <- as.numeric(unlist(als_row[, -1, with=FALSE], use.names=FALSE))
+  }
+
+  status_labels <- c("ALS", "Control")
 }
 
 p_colors <- ifelse(als_vals > 0.5, "red", "#9932CC")
@@ -161,7 +182,7 @@ run_plotting <- function(pdf_path, use_status_colors=FALSE) {
                pch=df$p_pch, col=df$p_col, cex=df$p_cex)
 
         if (use_status_colors)
-            legend("topleft", legend=c("ALS", "Control"), col=c("red", "#9932CC"),
+            legend("topleft", legend=status_labels, col=c("red", "#9932CC"),
                    pch=c(16,18), pt.cex=c(0.7,1.1), bty="n", cex=0.8)
 
         # Dominant ALT Model
@@ -178,7 +199,7 @@ run_plotting <- function(pdf_path, use_status_colors=FALSE) {
                pch=df$p_pch, col=df$p_col, cex=df$p_cex)
 
         if (use_status_colors)
-            legend("topleft", legend=c("ALS", "Control"), col=c("red", "#9932CC"),
+            legend("topleft", legend=status_labels, col=c("red", "#9932CC"),
                    pch=c(16,18), pt.cex=c(0.7,1.1), bty="n", cex=0.8)
 
         # Recessive ALT Model
@@ -195,7 +216,7 @@ run_plotting <- function(pdf_path, use_status_colors=FALSE) {
                pch=df$p_pch, col=df$p_col, cex=df$p_cex)
 
         if (use_status_colors)
-            legend("topleft", legend=c("ALS", "Control"), col=c("red", "#9932CC"),
+            legend("topleft", legend=status_labels, col=c("red", "#9932CC"),
                    pch=c(16,18), pt.cex=c(0.7,1.1), bty="n", cex=0.8)
 
         mtext(
