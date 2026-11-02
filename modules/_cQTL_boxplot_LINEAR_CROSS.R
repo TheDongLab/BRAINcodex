@@ -22,7 +22,19 @@ snp_loc   <- args[5]
 out_dir   <- args[6]
 tissue    <- args[7]
 
-RAW_FILE <- "/home/zw529/donglab/data/target_ALS/QTL/plink/joint_all_chrs_matrixEQTL.raw"
+# TargetALS remains the default for legacy runs.
+experiment <- Sys.getenv("EXPERIMENT", "target_ALS")
+if (!experiment %in% c("target_ALS", "answer_ALS")) {
+  stop("EXPERIMENT must be target_ALS or answer_ALS.")
+}
+
+RAW_FILE <- file.path(
+  path.expand("~/donglab/data"),
+  experiment,
+  "QTL",
+  "plink",
+  "joint_all_chrs_matrixEQTL.raw"
+)
 
 out_file_std <- file.path(out_dir, paste0(tissue, "_all_sig_Interaction_boxplots.pdf"))
 out_file_col <- file.path(out_dir, paste0(tissue, "_all_sig_Interaction_boxplots_colored.pdf"))
@@ -59,14 +71,43 @@ alleles <- merge(
 message(sprintf("# Allele mappings recovered: %d / %d SNPs",
                 sum(!is.na(alleles$counted)), nrow(alleles)))
 
-# Process the clinical interaction covariate status robustly
-cov_first_col <- names(cov_mat)[1]
-als_row <- cov_mat[cov_mat[[1]] == "is_als", ]
-if (nrow(als_row) == 0) {
-  warning("Warning: 'is_als' row not found in covariate matrix. Defaulting all values to 0.")
-  als_vals <- rep(0, ncol(cov_mat) - 1)
+# Determine case/control status.
+sample_ids <- names(expr_mat)[-1]
+
+if (experiment == "answer_ALS") {
+  status <- ifelse(
+    grepl("^CASE-", sample_ids, ignore.case=TRUE), "ALS",
+    ifelse(grepl("^CTRL-", sample_ids, ignore.case=TRUE), "Control", NA_character_)
+  )
+
+  if (anyNA(status)) {
+    stop(
+      "Could not assign AnswerALS CASE/CTRL status for: ",
+      paste(sample_ids[is.na(status)], collapse=", ")
+    )
+  }
+
+  als_vals <- as.integer(status == "ALS")
+  case_label <- "CASE"
+  control_label <- "CTRL"
 } else {
-  als_vals <- as.numeric(unlist(als_row[, -1, with=FALSE], use.names=FALSE))
+  # TargetALS keeps its existing is_als covariate behavior.
+  cov_first_col <- names(cov_mat)[1]
+  als_row <- cov_mat[cov_mat[[1]] == "is_als", ]
+
+  if (nrow(als_row) == 0) {
+    warning("Warning: 'is_als' row not found in covariate matrix. Defaulting all values to 0.")
+    als_vals <- rep(0, ncol(cov_mat) - 1)
+  } else {
+    als_vals <- as.numeric(unlist(als_row[, -1, with=FALSE], use.names=FALSE))
+  }
+
+  case_label <- "ALS"
+  control_label <- "Control"
+}
+
+if (length(als_vals) != length(sample_ids)) {
+  stop("Case/control status count does not match the number of phenotype-matrix samples.")
 }
 
 # Jitter plotting definitions
@@ -149,7 +190,7 @@ run_plotting <- function(pdf_path, use_status_colors=FALSE) {
         df_ctrl$SNP_f <- factor(df_ctrl$SNP, levels=0:2, labels=ctrl_labels)
 
         boxplot(expression ~ SNP_f, data=df_ctrl, col="lightblue", outline=FALSE,
-                ylab="circRNA Percentage (%)", xlab="Genotype", main="Controls Only")
+                ylab="circRNA Percentage (%)", xlab="Genotype", main=paste(control_label, "Samples Only"))
         points(jitter(as.numeric(df_ctrl$SNP_f), amount=0.15), df_ctrl$expression,
                pch=df_ctrl$p_pch, col=df_ctrl$p_col, cex=df_ctrl$p_cex)
 
@@ -160,7 +201,7 @@ run_plotting <- function(pdf_path, use_status_colors=FALSE) {
         df_als$SNP_f <- factor(df_als$SNP, levels=0:2, labels=als_labels)
 
         boxplot(expression ~ SNP_f, data=df_als, col="lightpink", outline=FALSE,
-                ylab="circRNA Percentage (%)", xlab="Genotype", main="ALS Only")
+                ylab="circRNA Percentage (%)", xlab="Genotype", main=paste(case_label, "Samples Only"))
         points(jitter(as.numeric(df_als$SNP_f), amount=0.15), df_als$expression,
                pch=df_als$p_pch, col=df_als$p_col, cex=df_als$p_cex)
 
@@ -178,7 +219,7 @@ run_plotting <- function(pdf_path, use_status_colors=FALSE) {
             abline(lm(expression ~ SNP, data=df_als), col="red", lwd=3)
         }, error=function(e) NULL)
 
-        legend("topright", legend=c("ALS Slope", "Control Slope"),
+        legend("topright", legend=c(paste(case_label, "Slope"), paste(control_label, "Slope")),
                col=c("red", "#9932CC"), lty=1, lwd=3, bty="n", cex=0.8)
 
         mtext(
