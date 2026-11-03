@@ -2,7 +2,8 @@
 #SBATCH --job-name=prep_joint_vcf
 #SBATCH --output=/home/zw529/donglab/data/answer_ALS/QTL/prep_joint_vcf.out   ### change log paths based on experiment
 #SBATCH --error=/home/zw529/donglab/data/answer_ALS/QTL/prep_joint_vcf.err   ### change log paths based on experiment
-#SBATCH --time=24:00:00
+#SBATCH --time=5-24:00:00
+#SBATCH --partition=week
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=48G
 
@@ -13,7 +14,7 @@ module load Python/3.12.3-GCCcore-13.3.0
 module load BCFtools/1.21-GCC-13.3.0
 module load HTSlib/1.21-GCC-13.3.0
 
-# Set to target_ALS or answer_ALS before running
+# Set to target_ALS or answer_ALS before running.
 EXPERIMENT="answer_ALS"
 
 BASE="/home/zw529/donglab/data/$EXPERIMENT"
@@ -24,9 +25,11 @@ VCF_LIST="$QTL_DIR/vcf_merge_list.txt"
 SAMPLE_MAP="$QTL_DIR/sample_map.txt"
 FINAL_VCF="$QTL_DIR/joint_genotyped_GQ.vcf.gz"
 
-# --- STEP 1: SELECT VCFs AND CREATE GT:GQ SIDECARS ---
+# --- STEP 1: SELECT VCFs AND PREPARE INPUTS ---
 
 if [[ "$EXPERIMENT" == "target_ALS" ]]; then
+
+    # Keep the existing TargetALS VCF ranking and sidecar behavior.
     echo "Ranking TargetALS VCFs and creating standardized sidecars..."
 
     find "$BASE" -name "*.vcf.gz" -printf '%h\n' | sort -u | while read -r dir; do
@@ -107,62 +110,156 @@ pd.DataFrame(sample_map).to_csv(
 )
 EOF
 
+    # --- STEP 3: TARGETALS MERGE & REHEADER ---
+    echo "Merging TargetALS sidecars (preserving GT and GQ)..."
+    bcftools merge -f PASS -l "$VCF_LIST" \
+        --threads 8 -O z -o "$FINAL_VCF"
+
+    echo "Reheadering sequencing IDs to subject IDs..."
+    bcftools reheader -s "$SAMPLE_MAP" \
+        -o "${FINAL_VCF}.tmp" "$FINAL_VCF"
+    mv "${FINAL_VCF}.tmp" "$FINAL_VCF"
+    tabix -f -p vcf "$FINAL_VCF"
+
 elif [[ "$EXPERIMENT" == "answer_ALS" ]]; then
-    echo "Preparing AnswerALS VCFs for RNA-seq participants..."
+
+    echo "Preparing AnswerALS raw gVCFs for joint genotyping..."
+
+    module load GATK/4.6.1.0-GCCcore-13.3.0-Java-17
 
     RNA_BASE="$BASE/iPSC_Motor_Neuron/RNAseq/Processed"
     WGS_BASE="$BASE/Blood/WGS/Processed"
-    SIDECAR_DIR="$QTL_DIR/sidecars"
+    REFERENCE="/home/zw529/donglab/references/genome/Homo_sapiens/UCSC/hg38/Sequence/WholeGenomeFasta/genome.fa"
+    EXPECTED_GVCFS=815
+
     CHROMS="chr1,chr2,chr3,chr4,chr5,chr6,chr7,chr8,chr9,chr10,chr11,chr12,chr13,chr14,chr15,chr16,chr17,chr18,chr19,chr20,chr21,chr22,chrX,chrY,chrM"
 
-    mkdir -p "$SIDECAR_DIR"
-    : > "$VCF_LIST"
+    [[ -s "$REFERENCE" ]] || {
+        echo "[ERROR] Reference FASTA not found: $REFERENCE" >&2
+        exit 1
+    }
+    [[ -s "${REFERENCE}.fai" ]] || {
+        echo "[ERROR] Reference FASTA index not found: ${REFERENCE}.fai" >&2
+        exit 1
+    }
+    [[ -s "${REFERENCE%.fa}.dict" ]] || {
+        echo "[ERROR] GATK sequence dictionary not found: ${REFERENCE%.fa}.dict" >&2
+        exit 1
+    }
+
+    WORK_DIR="$QTL_DIR/gatk_joint_work_${SLURM_JOB_ID:-manual}"
+    CLEAN_GVCF_DIR="$WORK_DIR/gvcfs"
+    DB_DIR="$WORK_DIR/genomicsdb"
+    RAW_JOINT_VCF="$WORK_DIR/joint_genotyped.raw.vcf.gz"
+    GATK_SAMPLE_MAP="$WORK_DIR/gatk_sample_name_map.tsv"
+
+    mkdir -p "$CLEAN_GVCF_DIR" "$WORK_DIR/tmp"
+    : > "$GATK_SAMPLE_MAP"
     : > "$SAMPLE_MAP"
+
+    declare -A seen_vcf_ids
+    gvcf_count=0
 
     for rna_dir in "$RNA_BASE"/*/; do
         [[ -d "$rna_dir" ]] || continue
         donor=$(basename "$rna_dir")
-        candidates=("$WGS_BASE/$donor"/*recalibrated.haplotypeCalls.vcf.gz)
+        candidates=("$WGS_BASE/$donor"/*.haplotypeCalls.er.raw.vcf.gz)
 
-        if ((${#candidates[@]} != 1)); then
-            echo "[WARN] $donor: expected one unannotated recalibrated VCF; found ${#candidates[@]}. Skipping."
+        if ((${#candidates[@]} == 0)); then
+            echo "[INFO] $donor: no raw gVCF in its WGS folder; skipping."
             continue
+        elif ((${#candidates[@]} != 1)); then
+            echo "[ERROR] $donor: expected one raw gVCF; found ${#candidates[@]}." >&2
+            exit 1
         fi
 
-        sidecar="$SIDECAR_DIR/$donor.genotypes_quality.vcf.gz"
-        bcftools view -t "$CHROMS" "${candidates[0]}" -Ou |
-            bcftools annotate -x INFO,^FORMAT/GT,FORMAT/GQ -Oz -o "$sidecar"
-        tabix -f -p vcf "$sidecar"
+        source_gvcf="${candidates[0]}"
+        vcf_samples=$(bcftools query -l "$source_gvcf")
+        sample_count=$(printf '%s\n' "$vcf_samples" | awk 'NF {n++} END {print n+0}')
 
-        vcf_id=$(bcftools query -l "$sidecar")
-        if [[ -z "$vcf_id" ]]; then
-            echo "[WARN] $donor: no VCF sample ID found. Skipping."
-            continue
+        if ((sample_count != 1)); then
+            echo "[ERROR] $donor: expected one VCF sample, found $sample_count in $source_gvcf" >&2
+            exit 1
         fi
 
-        printf '%s\n' "$sidecar" >> "$VCF_LIST"
+        vcf_id="$vcf_samples"
+        if [[ -n "${seen_vcf_ids[$vcf_id]+x}" ]]; then
+            echo "[ERROR] Duplicate VCF sample ID '$vcf_id' found for $donor and ${seen_vcf_ids[$vcf_id]}." >&2
+            exit 1
+        fi
+        seen_vcf_ids["$vcf_id"]="$donor"
+
+        clean_gvcf="$CLEAN_GVCF_DIR/${donor}.g.vcf.gz"
+        subset_gvcf="$CLEAN_GVCF_DIR/${donor}.subset.tmp.vcf.gz"
+
+        echo "Preparing $donor from $(basename "$source_gvcf")"
+
+        # Keep only the standard chromosomes requested for this QTL workflow.
+        # -t streams the source gVCF, so a source index is not required.
+        bcftools view -t "$CHROMS" -Oz \
+            -o "$subset_gvcf" "$source_gvcf"
+
+        # Match the contig declarations to the selected reference FASTA.
+        # This removes header contigs absent from the FASTA index.
+        bcftools reheader -f "${REFERENCE}.fai" \
+            -o "$clean_gvcf" "$subset_gvcf"
+        rm "$subset_gvcf"
+        bcftools index -f -t "$clean_gvcf"
+
+        printf '%s\t%s\n' "$vcf_id" "$clean_gvcf" >> "$GATK_SAMPLE_MAP"
         printf '%s\t%s\n' "$vcf_id" "$donor" >> "$SAMPLE_MAP"
+        ((gvcf_count+=1))
     done
 
-    [[ -s "$VCF_LIST" ]] || {
-        echo "[ERROR] No AnswerALS VCFs matched RNA-seq participant folders." >&2
+    if ((gvcf_count != EXPECTED_GVCFS)); then
+        echo "[ERROR] Expected $EXPECTED_GVCFS AnswerALS raw gVCFs, found $gvcf_count. Refusing to run an incomplete cohort." >&2
         exit 1
-    }
+    fi
+
+    echo "Prepared $gvcf_count raw gVCFs."
+    echo "Running GATK GenomicsDBImport..."
+
+    interval_args=()
+    IFS=',' read -r -a chrom_array <<< "$CHROMS"
+    for chr in "${chrom_array[@]}"; do
+        interval_args+=(-L "$chr")
+    done
+
+    gatk --java-options "-Xms32g -Xmx32g" GenomicsDBImport \
+        -R "$REFERENCE" \
+        --sample-name-map "$GATK_SAMPLE_MAP" \
+        --genomicsdb-workspace-path "$DB_DIR" \
+        --batch-size 50 \
+        --reader-threads 4 \
+        --tmp-dir "$WORK_DIR/tmp" \
+        "${interval_args[@]}"
+
+    echo "Running GATK GenotypeGVCFs..."
+    gatk --java-options "-Xms32g -Xmx32g" GenotypeGVCFs \
+        -R "$REFERENCE" \
+        -V "gendb://${DB_DIR}" \
+        -O "$RAW_JOINT_VCF" \
+        "${interval_args[@]}"
+
+    echo "Keeping GT and GQ fields and renaming samples to AnswerALS donor IDs..."
+    bcftools annotate -x INFO,^FORMAT/GT,FORMAT/GQ \
+        "$RAW_JOINT_VCF" -Oz -o "${FINAL_VCF}.tmp"
+
+    bcftools reheader -s "$SAMPLE_MAP" \
+        -o "$FINAL_VCF" "${FINAL_VCF}.tmp"
+    rm "${FINAL_VCF}.tmp"
+    tabix -f -p vcf "$FINAL_VCF"
+
+    final_sample_count=$(bcftools query -l "$FINAL_VCF" | wc -l)
+    if ((final_sample_count != EXPECTED_GVCFS)); then
+        echo "[ERROR] Final VCF has $final_sample_count samples; expected $EXPECTED_GVCFS." >&2
+        exit 1
+    fi
 
 else
     echo "[ERROR] EXPERIMENT must be target_ALS or answer_ALS." >&2
     exit 1
 fi
 
-# --- STEP 3: MERGE & REHEADER ---
-
-echo "Merging sidecars (preserving GT and GQ)..."
-bcftools merge -f PASS -l "$VCF_LIST" --threads 8 -O z -o "$FINAL_VCF"
-
-echo "Reheadering sequencing IDs to subject IDs..."
-bcftools reheader -s "$SAMPLE_MAP" -o "${FINAL_VCF}.tmp" "$FINAL_VCF"
-mv "${FINAL_VCF}.tmp" "$FINAL_VCF"
-tabix -f -p vcf "$FINAL_VCF"
-
 echo "Processing complete. Joint VCF ready at $FINAL_VCF"
-bcftools view -H "$FINAL_VCF" | head -n 1 | cut -f 1-12
+echo "Sample count: $(bcftools query -l "$FINAL_VCF" | wc -l)"
