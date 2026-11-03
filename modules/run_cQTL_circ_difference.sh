@@ -1,6 +1,5 @@
 #!/bin/bash
 #SBATCH --job-name=cqtl_delta_circ
-#SBATCH --partition=day
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=80G
 #SBATCH --time=1-23:00:00
@@ -8,6 +7,8 @@
 #SBATCH --output=/home/zw529/donglab/data/target_ALS/QTL/cqtl_circ_difference_%j.out
 #SBATCH --error=/home/zw529/donglab/data/target_ALS/QTL/cqtl_circ_difference_%j.err
 
+# Answer ALS: pass --experiment answer_ALS; override sbatch --output/--error for Answer ALS logs
+# Optional --sample-map TSV: externalsubjectid, externalsampleid, optional tissue
 # Usage for specific tissues: QTL_TISSUES="Cortex Spinal_Cord" sbatch --export=ALL run_cQTL_circ_difference.sh
 
 set -euo pipefail
@@ -29,7 +30,7 @@ import pyBigWig
 from matplotlib.patches import Rectangle, PathPatch
 from matplotlib.path import Path as MplPath
 from matplotlib.ticker import FuncFormatter
-CANONICAL_TISSUES=['Cerebellum','Frontal_Cortex','Motor_Cortex','Cervical_Spinal_Cord','Lumbar_Spinal_Cord','Cortex','Spinal_Cord']
+CANONICAL_TISSUES=['Cerebellum','Frontal_Cortex','Motor_Cortex','Cervical_Spinal_Cord','Lumbar_Spinal_Cord','Cortex','Spinal_Cord','iPSC_Motor_Neuron']
 GENOTYPE_LABELS={0:'Ref/Ref',1:'Het',2:'Hom Alt'}
 TRACK_COLORS={0:'#228B22',1:'#4682B4',2:'#C75B7A'}
 processed_root_cache={};processed_sample_cache={};primary_read_cache={};leafcutter_cache={}
@@ -120,28 +121,43 @@ def parse_event_coordinates(event):
 
 def processed_roots_for_tissue(ROOT,tissue):
     t=canonical_tissue(tissue)
-    if t in processed_root_cache:return processed_root_cache[t]
-    roots=[];preferred=ROOT/t/"RNAseq"/"Processed"
-    if preferred.is_dir():roots.append(preferred)
-    for p in ROOT.iterdir():
-        if p.is_dir() and tissue_equal(p.name,t):
-            q=p/"RNAseq"/"Processed"
-            if q.is_dir() and q not in roots:roots.append(q)
-    processed_root_cache[t]=roots;print(f"  RNAseq roots for {t}: "+(" | ".join(map(str,roots)) if roots else "NONE"));return roots
+    key=(str(ROOT),t,str(PROCESSED_ROOT))
+    if key in processed_root_cache:return processed_root_cache[key]
+    roots=[]
+    if PROCESSED_ROOT is not None:
+        roots=[PROCESSED_ROOT]
+    else:
+        preferred=ROOT/t/"RNAseq"/"Processed"
+        if preferred.is_dir():roots.append(preferred)
+        for p in ROOT.iterdir():
+            if p.is_dir() and tissue_equal(p.name,t):
+                q=p/"RNAseq"/"Processed"
+                if q.is_dir() and q not in roots:roots.append(q)
+    processed_root_cache[key]=roots
+    print(f"  RNAseq roots for {t}: "+(" | ".join(map(str,roots)) if roots else "NONE"),flush=True)
+    return roots
 
 def resolve_sample_dir(ROOT,tissue,sid):
-    key=(canonical_tissue(tissue),norm(sid))
+    key=(str(ROOT),canonical_tissue(tissue),sid,str(PROCESSED_ROOT))
     if key in processed_sample_cache:return processed_sample_cache[key]
-    for root in processed_roots_for_tissue(ROOT,tissue):
+    roots=processed_roots_for_tissue(ROOT,tissue)
+    matches=set()
+    for root in roots:
         for x in [sid,sid.replace("-","_"),sid.replace("_","-")]:
             p=root/x
-            if p.is_dir():processed_sample_cache[key]=p;return p
-    for root in processed_roots_for_tissue(ROOT,tissue):
-        rk=str(root)
-        if rk not in processed_sample_cache:processed_sample_cache[rk]={norm(p.name):p for p in root.iterdir() if p.is_dir()}
-        p=processed_sample_cache[rk].get(norm(sid))
-        if p is not None:processed_sample_cache[key]=p;return p
-    processed_sample_cache[key]=None;return None
+            if p.is_dir():matches.add(p.resolve())
+    # Keep the legacy broader matching for Target ALS only.
+    if not matches and EXPERIMENT=='target_ALS':
+        for root in roots:
+            matches.update(p.resolve() for p in root.iterdir() if p.is_dir() and norm(p.name)==norm(sid))
+    if len(matches)>1:
+        raise ValueError(f'Ambiguous sample directory for {sid}: {sorted(map(str,matches))}')
+    result=next(iter(matches),None)
+    processed_sample_cache[key]=result
+    return result
+
+EXPERIMENT='target_ALS'
+PROCESSED_ROOT=None
 
 def primary_read_count(sd):
     bam=sd/"STAR.Aligned.sortedByCoord.out.bam";k=str(bam)
@@ -203,6 +219,45 @@ def parse_gtf_attrs(s):
         p=x.strip().split(" ",1)
         if len(p)==2:out[p[0]]=p[1].strip().strip('"')
     return out
+
+def load_gene_index(gtf):
+    # Match the zero-based, half-open convention used by the coverage plots.
+    # GTF coordinates are one-based inclusive, so subtract one from the start.
+    genes=defaultdict(list)
+    with open(gtf) as f:
+        for line in f:
+            if line.startswith('#'):continue
+            fields=line.rstrip('\n').split('\t')
+            if len(fields)<9 or fields[2]!='gene':continue
+            attrs=parse_gtf_attrs(fields[8])
+            gene_id=attrs.get('gene_id','')
+            gene_name=attrs.get('gene_name','')
+            if not gene_id and not gene_name:continue
+            genes[chr_key(fields[0])].append((int(fields[3])-1,int(fields[4]),fields[6],gene_name,gene_id))
+    if not genes:raise ValueError(f'No gene annotations found in GTF: {gtf}')
+    for chrom in genes:genes[chrom].sort(key=lambda row:row[0])
+    return genes
+
+def annotate_circ_gene(event,gene_index,cache):
+    # Report all overlapping genes on the circRNA strand, not the SNP genes.
+    # Multiple symbols/IDs are separated by semicolons; missing matches stay NA.
+    if event in cache:return cache[event]
+    coords=parse_event_coordinates(event)
+    symbols=set();gene_ids=set()
+    if coords is not None:
+        start,end=sorted((coords['start'],coords['end']))
+        strand=coords['strand']
+        for left,right,gene_strand,symbol,gene_id in gene_index.get(chr_key(coords['chr']),[]):
+            if left>=end:break
+            if right<=start:continue
+            if strand in ('+','-') and gene_strand!=strand:continue
+            if symbol:symbols.add(symbol)
+            if gene_id:gene_ids.add(gene_id)
+    cache[event]={
+        'gene_name':';'.join(sorted(symbols)) if symbols else None,
+        'gene_id':';'.join(sorted(gene_ids)) if gene_ids else None
+    }
+    return cache[event]
 
 def load_reference_exons(gtf,chrom,start,end):
     out=[]
@@ -311,6 +366,32 @@ def sample_metadata(meta,tissue,subjects):
     m=m[(pd.to_numeric(m.post_mortem_interval_in_hours,errors='coerce')<=40)&(m.RIN_score>=3)]
     return m.sort_values('RIN_score',ascending=False).drop_duplicates('externalsubjectid')
 
+def read_metadata(path):
+    return pd.read_csv(path,sep='\t' if path.suffix.lower() in ('.tsv','.txt') else ',',
+                       dtype=str,keep_default_na=False,encoding='utf-8-sig')
+
+def answer_sample_metadata(meta,tissue,subjects,subject_column=None,sample_column=None):
+    m=meta.copy()
+    m.columns=m.columns.str.strip()
+    if m.empty:raise ValueError('Answer ALS metadata/sample map is empty')
+    subject_column=subject_column or ('externalsubjectid' if 'externalsubjectid' in m else m.columns[0])
+    sample_column=sample_column or ('externalsampleid' if 'externalsampleid' in m else subject_column)
+    for col in (subject_column,sample_column):
+        if col not in m:raise ValueError(f'Metadata column not found: {col}')
+    print(f'  Answer ALS ID columns: subject={subject_column}, sample={sample_column}',flush=True)
+    if 'tissue' in m:m=m[m.tissue.map(lambda x:tissue_equal(x,tissue))]
+    selected=pd.DataFrame({'externalsubjectid':m[subject_column].astype(str).str.strip(),
+                           'externalsampleid':m[sample_column].astype(str).str.strip()})
+    selected=selected[selected.externalsubjectid.isin(subjects)].copy()
+    if selected.empty:
+        raise ValueError('No Answer ALS metadata IDs match matrix subjects. Supply --sample-map or explicit --subject-column/--sample-column.')
+    if selected.externalsampleid.eq('').any():raise ValueError('Missing RNA sample ID in Answer ALS sample map')
+    selected=selected.drop_duplicates()
+    if selected.externalsubjectid.duplicated().any() or selected.externalsampleid.duplicated().any():
+        raise ValueError('Answer ALS requires one RNA sample per matrix subject and one subject per RNA sample. Supply --sample-map with the samples used to build the circ matrix; do not guess replicate IDs.')
+    # iPSC samples have no postmortem interval filter. Retain upstream QTL cohort.
+    return selected
+
 def quant_rows(path,wanted):
     # Exact circ ID only; no tolerance matching and no missing-to-zero conversion.
     result={};duplicate=set()
@@ -395,13 +476,41 @@ def aligned_records(event,subjects,samples,phenotype,g,ref,alt,counted):
 
 def main():
     ap=argparse.ArgumentParser(description='Top 10 significant cQTL circ percentage differences; max 2 SNPs per circ; N>=5 in all three genotype groups.')
-    ap.add_argument('--root',type=Path,default=Path.home()/'donglab/data/target_ALS')
+    ap.add_argument('--experiment',choices=['target_ALS','answer_ALS'],default=os.environ.get('EXPERIMENT','target_ALS'))
+    ap.add_argument('--root',type=Path)
+    ap.add_argument('--metadata',type=Path)
+    ap.add_argument('--sample-map',type=Path,help='Answer ALS TSV with externalsubjectid and externalsampleid; one sample per matrix subject.')
+    ap.add_argument('--subject-column',help='Answer ALS metadata subject ID column.')
+    ap.add_argument('--sample-column',help='Answer ALS metadata RNA sample ID column.')
+    ap.add_argument('--processed-root',type=Path,help='Directory containing per-sample RNAseq folders; use with one tissue.')
     ap.add_argument('--outdir',type=Path)
-    ap.add_argument('--tissues',nargs='+',default=os.environ.get('QTL_TISSUES','Cerebellum Frontal_Cortex Motor_Cortex Cervical_Spinal_Cord Lumbar_Spinal_Cord').split())
+    ap.add_argument('--tissues',nargs='+',default=None)
     ap.add_argument('--gtf',type=Path,default=Path.home()/'donglab/references/genome/Homo_sapiens/UCSC/hg38/Annotation/gencode/gencode.v49.annotation.gtf')
     ap.add_argument('--no-plots',action='store_true')
-    a=ap.parse_args();a.outdir=a.outdir or a.root/'QTL/cqtl_circ_difference';a.outdir.mkdir(parents=True,exist_ok=True)
-    meta=pd.read_csv(a.root/'targetALS_rnaseq_metadata.csv',low_memory=False)
+    a=ap.parse_args()
+    global EXPERIMENT,PROCESSED_ROOT
+    EXPERIMENT=a.experiment
+    if EXPERIMENT not in ('target_ALS','answer_ALS'):ap.error('Invalid EXPERIMENT environment variable')
+    a.root=(a.root or Path.home()/'donglab/data'/EXPERIMENT).expanduser()
+    defaults=['iPSC_Motor_Neuron'] if EXPERIMENT=='answer_ALS' else CANONICAL_TISSUES[:5]
+    a.tissues=a.tissues or os.environ.get('QTL_TISSUES','').split() or defaults
+    if a.processed_root and len(a.tissues)!=1:ap.error('--processed-root requires exactly one tissue')
+    PROCESSED_ROOT=a.processed_root.expanduser() if a.processed_root else None
+    if PROCESSED_ROOT and not PROCESSED_ROOT.is_dir():ap.error(f'Processed root not found: {PROCESSED_ROOT}')
+    if EXPERIMENT=='target_ALS' and any([a.sample_map,a.subject_column,a.sample_column]):
+        ap.error('--sample-map/--subject-column/--sample-column are for --experiment answer_ALS')
+    if a.sample_map and any([a.metadata,a.subject_column,a.sample_column]):
+        ap.error('Use --sample-map by itself, or --metadata with optional ID columns')
+    a.outdir=(a.outdir or a.root/'QTL/cqtl_circ_difference').expanduser()
+    a.outdir.mkdir(parents=True,exist_ok=True)
+    print(f'Experiment: {EXPERIMENT} | root: {a.root} | tissues: {a.tissues}',flush=True)
+    print('Loading gene symbols from',a.gtf,flush=True)
+    gene_index=load_gene_index(a.gtf);gene_annotation_cache={}
+    metadata_path=(a.sample_map or a.metadata or a.root/('aals_dataportal_datatable.csv' if EXPERIMENT=='answer_ALS' else 'targetALS_rnaseq_metadata.csv')).expanduser()
+    print('Metadata:',metadata_path,flush=True)
+    meta=read_metadata(metadata_path) if EXPERIMENT=='answer_ALS' else pd.read_csv(metadata_path,low_memory=False)
+    if a.sample_map and not {'externalsubjectid','externalsampleid'}.issubset(meta.columns):
+        ap.error('--sample-map requires externalsubjectid and externalsampleid columns')
     allele_map=defaultdict(set)
     with (a.root/'QTL/plink/joint_all_chrs_matrixEQTL.raw').open() as f:
         for token in f.readline().split()[6:]:
@@ -426,7 +535,7 @@ def main():
                 key=r['snpid'];v=(chr_key(r['chr']),int(r['pos']))
                 if key in loc and loc[key]!=v:raise ValueError(f'Ambiguous location: {key}')
                 loc[key]=v
-        mt=sample_metadata(meta,tissue,subjects)
+        mt=answer_sample_metadata(meta,tissue,subjects,a.subject_column,a.sample_column) if EXPERIMENT=='answer_ALS' else sample_metadata(meta,tissue,subjects)
         samples={};sample_audit=[];wanted=set(sig.circ_id)
         for row in mt.to_dict('records'):
             sid=str(row['externalsampleid']);sub=str(row['externalsubjectid']);sd=resolve_sample_dir(a.root,tissue,sid)
@@ -440,6 +549,8 @@ def main():
             samples[sub]=dict(sample_id=sid,sample_dir=sd,primary_reads=n,quant=quant)
         for sub in set(subjects)-set(mt.externalsubjectid):sample_audit.append(dict(subject_id=sub,sample_id='',reason='missing_eligible_metadata'))
         table(sample_audit,out/'excluded_samples.tsv',columns=['subject_id','sample_id','reason'])
+        print(f'  Matrix subjects: {len(subjects)} | selected metadata: {len(mt)} | usable samples: {len(samples)}',flush=True)
+        if not samples:raise ValueError(f'{tissue}: no usable RNA samples. See {out}/excluded_samples.tsv; check --processed-root, ID mapping, BAM and BigWig filenames.')
         rows=[];excluded=[];raw_missing=0;matrix_discordant=0
         for pair in sig.to_dict('records'):
             event=pair['circ_id'];snp=pair['snpid'];aa=allele_map.get(loc.get(snp),set())
@@ -456,12 +567,13 @@ def main():
             records,nmissing,ndiscordant=aligned_records(event,subjects,samples,phenos[event],g,ref,alt,counted)
             raw_missing+=nmissing;matrix_discordant+=ndiscordant
             result=dict(pair,tissue=tissue,ref=ref,alt=alt,plink_counted_allele=counted)
+            result.update(annotate_circ_gene(event,gene_index,gene_annotation_cache))
             for value,label in [(0,'ref_ref'),(1,'het'),(2,'hom_alt')]:
                 v=[r['circ_percent'] for r in records if r['genotype']==value]
                 result['n_'+label]=len(v);result['mean_'+label+'_pct']=100*np.mean(v) if v else np.nan
             result['delta_alt_minus_ref_pp']=result['mean_hom_alt_pct']-result['mean_ref_ref_pct'];result['abs_delta_pp']=abs(result['delta_alt_minus_ref_pp'])
             rows.append(result)
-        columns=list(sig.columns)+['tissue','ref','alt','plink_counted_allele','n_ref_ref','n_het','n_hom_alt','mean_ref_ref_pct','mean_het_pct','mean_hom_alt_pct','delta_alt_minus_ref_pp','abs_delta_pp']
+        columns=list(dict.fromkeys(list(sig.columns)+['gene_name','gene_id','tissue','ref','alt','plink_counted_allele','n_ref_ref','n_het','n_hom_alt','mean_ref_ref_pct','mean_het_pct','mean_hom_alt_pct','delta_alt_minus_ref_pp','abs_delta_pp']))
         allrows=pd.DataFrame(rows,columns=columns);rank=ranked_pairs(allrows)
         table(rank,out/'ranked_qualifying.tsv');table(rank.drop_duplicates('circ_id'),out/'best_snp_per_circ.tsv')
         rejected=allrows[(allrows[['n_ref_ref','n_het','n_hom_alt']]<5).any(axis=1)].copy();rejected['reason']='fewer_than_5_usable_subjects_in_at_least_one_genotype'
@@ -483,7 +595,8 @@ def main():
         pd.DataFrame(selected,columns=columns)[['circ_id','snpid']].to_csv(out/'top_pairs.tsv',sep='\t',header=False,index=False)
         tops.extend(selected);audit.append(dict(tissue=tissue,significant_pairs=len(sig),qualifying_pairs=len(rank),selected_for_plots=len(selected),plots_written=0 if a.no_plots else len(selected),mapping_excluded=len(excluded),excluded_genotype_counts=len(rejected),missing_raw_quant_pair_subjects=raw_missing,discordant_matrix_pair_subjects=matrix_discordant,plot_input_exclusions=len(plot_exclusions)))
         print(tissue,'selected',len(selected),'qualifying',len(rank),flush=True)
-    table(tops,a.outdir/'top10_per_tissue.tsv',columns=['rank']+columns)
+    top_columns=list(dict.fromkeys(['rank','tissue','circ_id','gene_name','gene_id','snpid']+columns))
+    table(tops,a.outdir/'top10_per_tissue.tsv',columns=top_columns)
     table(audit,a.outdir/'audit.tsv');(a.outdir/'plot_jobs.json').write_text(json.dumps(jobs,indent=2,default=str))
     print('COMPLETE',a.outdir,flush=True)
 
