@@ -231,15 +231,18 @@ elif [[ "$EXPERIMENT" == "answer_ALS" ]]; then
     MERGED_TMP="$QTL_DIR/joint_genotyped_GQ.${JOB_TAG}.merged.tmp.vcf.gz"
     REF_TMP="$QTL_DIR/joint_genotyped_GQ.${JOB_TAG}.refheader.tmp.vcf.gz"
     SAMPLE_TMP="$QTL_DIR/joint_genotyped_GQ.${JOB_TAG}.samples.tmp.vcf.gz"
+    
+    while IFS= read -r gvcf; do
+        [[ -s "${gvcf}.csi" || -s "${gvcf}.tbi" ]] || bcftools index --csi "$gvcf"
+    done < "$VCF_LIST"
 
     # --gvcf uses INFO/END blocks to recover reference genotypes at variant sites.
-    # --no-index avoids building 815 separate indexes; contig order was checked above.
-    # -t limits records to the canonical chromosomes in the selected UCSC reference.
+    # --regions limits the merge to canonical chromosomes in the selected UCSC reference.
+    # Region-restricted merging requires indexed inputs; do not use --no-index here.
     # Do not use --missing-to-ref: only explicit gVCF reference blocks support 0/0 calls.
     bcftools merge \
         --gvcf "$REFERENCE" \
-        --no-index \
-        --targets "$CHROMS" \
+        --regions "$CHROMS" \
         --merge 'both,*' \
         --file-list "$VCF_LIST" \
         --output-type u |
