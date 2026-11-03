@@ -119,6 +119,19 @@ def main():
         boxplot=a.scripts_dir/'_sQTL_boxplot.R'
         if 'SQTL_OPTIONAL_RAW_FILE' not in boxplot.read_text():
             ap.error('Install the accompanying updated _sQTL_boxplot.R first; it accepts the cohort PLINK file as argument 8.')
+    # The existing boxplot reads EXPERIMENT, not an eighth positional argument.
+    # Pass the resolved CLI/environment choice explicitly to every R child.
+    plot_env=os.environ.copy()
+    plot_env['EXPERIMENT']=a.experiment
+    if not a.no_plots:
+        expected_raw=Path.home()/'donglab/data'/a.experiment/'QTL/plink/joint_all_chrs_matrixEQTL.raw'
+        ranking_raw=a.root/'QTL/plink/joint_all_chrs_matrixEQTL.raw'
+        if ranking_raw.resolve()!=expected_raw.resolve():
+            try: same_raw=ranking_raw.samefile(expected_raw)
+            except OSError: same_raw=False
+            if not same_raw:
+                ap.error('Your boxplot resolves PLINK under ~/donglab/data/EXPERIMENT. '
+                         'For plotting, --root must use that same PLINK file; otherwise use --no-plots.')
     a.outdir.mkdir(parents=True,exist_ok=True)
     print('Experiment:',a.experiment,'Root:',a.root,'Tissues:',a.tissues,flush=True)
     if not a.no_plots and a.cluster_counts:
@@ -271,8 +284,10 @@ def main():
             cmd=['Rscript',str(a.scripts_dir/'_sQTL_boxplot.R'),str(out/'top_pairs.tsv'),
                  str(out/'top_snp_matrix.tsv'),str(out/'top_splicing_matrix.tsv'),str(out/'top_covariates.tsv'),
                  str(out/'top_snp_locations.tsv'),str(out),t,str(raw)]
+                 str(out/'top_snp_locations.tsv'),str(out),t]
             with (out/'boxplots.log').open('w') as log:
                 subprocess.run(cmd,stdout=log,stderr=subprocess.STDOUT,check=True)
+                subprocess.run(cmd,stdout=log,stderr=subprocess.STDOUT,check=True,env=plot_env)
         for p in plot_jobs:
             command=['Rscript',str(a.scripts_dir/'plot_sQTL_leafviz_PSI.R'),'--tissue',p['tissue'],'--tissue-regex',PATTERNS[p['tissue']],
                 '--anchor',p['junction_id'],'--gene',p['gene_name'].split(';')[0],
@@ -288,6 +303,7 @@ def main():
                     paired += ['--cluster-counts',a.cluster_counts.replace('{tissue}',p['tissue'])]
                 with open(Path(p['outdir'])/(p['prefix']+f'.{view}.plot.log'),'w') as log:
                     subprocess.run(paired,stdout=log,stderr=subprocess.STDOUT,check=True)
+                    subprocess.run(paired,stdout=log,stderr=subprocess.STDOUT,check=True,env=plot_env)
     print('COMPLETE',flush=True)
 
 if __name__=='__main__': main()
