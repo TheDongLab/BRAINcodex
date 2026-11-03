@@ -279,27 +279,9 @@ def main():
     (a.outdir/'plot_jobs.json').write_text(json.dumps(plot_jobs,indent=2))
     if not a.no_plots:
         for t in a.tissues:
-            out=a.outdir/t
-            if not (out/'top_pairs.tsv').stat().st_size: continue
-                        cmd = [
-                'Rscript',
-                str(a.scripts_dir / '_sQTL_boxplot.R'),
-                str(out / 'top_pairs.tsv'),
-                str(out / 'top_snp_matrix.tsv'),
-                str(out / 'top_splicing_matrix.tsv'),
-                str(out / 'top_covariates.tsv'),
-                str(out / 'top_snp_locations.tsv'),
-                str(out),
-                t,
-            ]
-            with (out / 'boxplots.log').open('w') as log:
-                subprocess.run(
-                    cmd,
-                    stdout=log,
-                    stderr=subprocess.STDOUT,
-                    check=True,
-                    env=plot_env,
-                )
+            out = a.outdir / t
+            if not (out / 'top_pairs.tsv').stat().st_size: continue
+            subprocess.run(['Rscript', str(a.scripts_dir/'_sQTL_boxplot.R'), str(out/'top_pairs.tsv'), str(out/'top_snp_matrix.tsv'), str(out/'top_splicing_matrix.tsv'), str(out/'top_covariates.tsv'), str(out/'top_snp_locations.tsv'), str(out), t], check=True, env=plot_env)
         for p in plot_jobs:
             command=['Rscript',str(a.scripts_dir/'plot_sQTL_leafviz_PSI.R'),'--tissue',p['tissue'],'--tissue-regex',PATTERNS[p['tissue']],
                 '--anchor',p['junction_id'],'--gene',p['gene_name'].split(';')[0],
