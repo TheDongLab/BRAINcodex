@@ -17,24 +17,28 @@
 set -euo pipefail
 TASK_PYTHON=/home/zw529/donglab/pipelines/modules/miniconda3/bin/python
 TASK_SCRIPTS=/home/zw529/donglab/pipelines/scripts/QTL
-TASK_OUTPUT=/home/zw529/donglab/data/target_ALS/QTL/sqtl_splicing_difference
-module load R
-# -I ignores PYTHONPATH/PYTHONHOME and user packages injected by the R module.
+TASK_RANK_ONLY=0
+for task_arg in "$@"; do
+    if [[ "$task_arg" == "--no-plots" ]]; then TASK_RANK_ONLY=1; fi
+done
+if [[ "$TASK_RANK_ONLY" == 0 ]]; then module load R; fi
+# -I prevents mixed Python environments from loaded modules.
 "$TASK_PYTHON" -I -c 'import sys,numpy,pandas; print("Python:",sys.executable); print("NumPy:",numpy.__file__); print("pandas:",pandas.__file__)'
+if [[ "$TASK_RANK_ONLY" == 0 ]]; then
 Rscript -e 'stopifnot(requireNamespace("data.table",quietly=TRUE),requireNamespace("ggplot2",quietly=TRUE),requireNamespace("gridExtra",quietly=TRUE),requireNamespace("svglite",quietly=TRUE)); cat("R plotting dependencies OK\n")'
 for task_file in _sQTL_boxplot.R plot_sQTL_leafviz_PSI.R; do
     test -r "$TASK_SCRIPTS/$task_file"
 done
+fi
 if [[ "${1:-}" == "--check" ]]; then exit 0; fi
-mkdir -p "$TASK_OUTPUT"
-"$TASK_PYTHON" -I -u - --outdir "$TASK_OUTPUT" --scripts-dir "$TASK_SCRIPTS" "$@" <<'PYTHON'
+"$TASK_PYTHON" -I -u - --scripts-dir "$TASK_SCRIPTS" "$@" <<'PYTHON'
 #!/usr/bin/env python3
 """Rank significant sQTLs by observed homozygote mean PSI difference.
 
 Stream large matrices; never impute missing PSI or assume PLINK counts ALT.
 Ambiguous coordinate-to-allele mappings are excluded and reported.
 """
-import argparse, csv, json, re, subprocess
+import argparse, csv, json, re, subprocess, os
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -42,7 +46,8 @@ import pandas as pd
 TISSUES = ['Cerebellum','Frontal_Cortex','Motor_Cortex','Cervical_Spinal_Cord','Lumbar_Spinal_Cord']
 PATTERNS = {'Cerebellum':'Cerebellum','Frontal_Cortex':'Frontal',
             'Motor_Cortex':'Motor.*Cortex|Cortex.*Motor|BA4',
-            'Cervical_Spinal_Cord':'Cervical','Lumbar_Spinal_Cord':'Lumbar|Lumbosacral'}
+            'Cervical_Spinal_Cord':'Cervical','Lumbar_Spinal_Cord':'Lumbar|Lumbosacral',
+            'iPSC_Motor_Neuron':r'iPSC[ _-]*Motor[ _-]*Neuron'}
 
 def matrix(path, wanted):
     data = {}
@@ -67,16 +72,55 @@ def rank_qualifying(rows):
     ranked.insert(0,'rank',np.arange(1,len(ranked)+1))
     return ranked
 
+def answer_metadata(meta,tissue,subjects,subject_column=None,sample_column=None):
+    if meta.empty:raise ValueError('Answer ALS metadata is empty')
+    m=meta.copy()
+    subject_column=subject_column or ('externalsubjectid' if 'externalsubjectid' in m else m.columns[0])
+    sample_column=sample_column or ('externalsampleid' if 'externalsampleid' in m else subject_column)
+    for col in (subject_column,sample_column):
+        if col not in m:raise ValueError(f'Missing metadata column: {col}')
+    if 'tissue' in m:
+        m=m[m.tissue.str.contains(PATTERNS[tissue],case=False,regex=True,na=False)]
+    result=pd.DataFrame({'externalsubjectid':m[subject_column].astype(str).str.strip(),
+                         'externalsampleid':m[sample_column].astype(str).str.strip()})
+    result=result[result.externalsubjectid.isin(subjects)].drop_duplicates()
+    if result.empty:raise ValueError('No Answer ALS metadata IDs match matrix subjects; supply --sample-map or ID-column options')
+    if result.externalsampleid.eq('').any():raise ValueError('Missing Answer ALS RNA sample IDs')
+    if result.externalsubjectid.duplicated().any() or result.externalsampleid.duplicated().any():
+        raise ValueError('Ambiguous donor/sample mapping. Supply --sample-map with one RNA sample per matrix subject, matching the samples used to build the PSI matrix.')
+    result['tissue']=tissue
+    # The input matrices define the iPSC cohort; no postmortem/RIN filtering.
+    return result
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument('--root',type=Path,default=Path.home()/'donglab/data/target_ALS')
-    ap.add_argument('--outdir',type=Path,required=True)
+    ap.add_argument('--experiment',choices=['target_ALS','answer_ALS'],default=os.environ.get('EXPERIMENT','target_ALS'))
+    ap.add_argument('--root',type=Path)
+    ap.add_argument('--metadata',type=Path,help='Answer ALS defaults to aals_dataportal_datatable.csv')
+    ap.add_argument('--sample-map',type=Path,help='Answer ALS TSV: externalsubjectid, externalsampleid; optional tissue')
+    ap.add_argument('--subject-column',help='Answer ALS metadata column matching QTL matrix subjects')
+    ap.add_argument('--sample-column',help='Answer ALS metadata column identifying RNA samples')
+    ap.add_argument('--outdir',type=Path)
     ap.add_argument('--scripts-dir',type=Path,default=Path.home()/'donglab/pipelines/scripts/QTL')
-    ap.add_argument('--tissues', nargs='+', choices=TISSUES, default=TISSUES)
+    ap.add_argument('--tissues', nargs='+', choices=TISSUES+['iPSC_Motor_Neuron'], default=None)
     ap.add_argument('--cluster-counts', help='Unfiltered LeafCutter counts; use {tissue} for multiple tissues')
     ap.add_argument('--no-plots',action='store_true',help='Calculate rankings only')
     ap.add_argument('--gtf',type=Path,default=Path.home()/'donglab/references/genome/Homo_sapiens/UCSC/hg38/Annotation/gencode/gencode.v49.annotation.gtf')
-    a=ap.parse_args(); a.outdir.mkdir(parents=True,exist_ok=True)
+    a=ap.parse_args()
+    if a.experiment not in ('target_ALS','answer_ALS'):ap.error('Invalid EXPERIMENT environment variable')
+    a.root=(a.root or Path.home()/'donglab/data'/a.experiment).expanduser()
+    a.outdir=(a.outdir or a.root/'QTL/sqtl_splicing_difference').expanduser()
+    a.tissues=a.tissues or (['iPSC_Motor_Neuron'] if a.experiment=='answer_ALS' else TISSUES)
+    if a.experiment=='target_ALS' and any([a.sample_map,a.subject_column,a.sample_column]):
+        ap.error('Sample-map and ID-column options require --experiment answer_ALS')
+    if a.sample_map and any([a.metadata,a.subject_column,a.sample_column]):
+        ap.error('Use --sample-map alone or --metadata with optional ID columns')
+    if a.experiment=='answer_ALS' and not a.no_plots:
+        boxplot=a.scripts_dir/'_sQTL_boxplot.R'
+        if 'SQTL_OPTIONAL_RAW_FILE' not in boxplot.read_text():
+            ap.error('Install the accompanying updated _sQTL_boxplot.R first; it accepts the cohort PLINK file as argument 8.')
+    a.outdir.mkdir(parents=True,exist_ok=True)
+    print('Experiment:',a.experiment,'Root:',a.root,'Tissues:',a.tissues,flush=True)
     if not a.no_plots and a.cluster_counts:
         if len(a.tissues)>1 and '{tissue}' not in a.cluster_counts:
             ap.error('Use --tissues for one tissue or a --cluster-counts path containing {tissue}')
@@ -87,7 +131,8 @@ def main():
     for t in a.tissues:
         q=a.root/t/'sQTL'
         s=pd.read_csv(q/'results'/f'{t}_sQTL.FDR0.05.txt',sep='\t')
-        s=s[pd.to_numeric(s.FDR,errors='coerce')<=0.05].drop_duplicates(['junction_id','snpid'])
+        s['FDR']=pd.to_numeric(s.FDR,errors='coerce')
+        s=s[s.FDR.between(0,0.05)].sort_values('FDR').drop_duplicates(['junction_id','snpid'])
         sigs[t]=s; wanted=set(s.snpid); loc={}
         with (q/'snp_location.txt').open() as f:
             for r in csv.DictReader(f,delimiter='\t'):
@@ -106,7 +151,16 @@ def main():
             c,p,ref,alt,counted=m.groups(); k=(c,int(p))
             if k in targets: alleles.setdefault(k,set()).add((ref,alt,counted))
     print('Allele coordinates mapped',len(alleles),flush=True)
-    meta=pd.read_csv(a.root/'targetALS_rnaseq_metadata.csv',low_memory=False)
+    meta=None
+    if not a.no_plots:
+        metadata_path=(a.sample_map or a.metadata or a.root/('aals_dataportal_datatable.csv' if a.experiment=='answer_ALS' else 'targetALS_rnaseq_metadata.csv')).expanduser()
+        if a.experiment=='answer_ALS':
+            meta=pd.read_csv(metadata_path,sep='\t' if metadata_path.suffix.lower() in ('.txt','.tsv') else ',',dtype=str,keep_default_na=False,encoding='utf-8-sig')
+            meta.columns=meta.columns.str.strip()
+            if a.sample_map and not {'externalsubjectid','externalsampleid'}.issubset(meta.columns):
+                ap.error('--sample-map requires externalsubjectid and externalsampleid')
+        else:meta=pd.read_csv(metadata_path,low_memory=False)
+        print('Metadata:',metadata_path,flush=True)
     genes={}
     with a.gtf.open() as f:
         for line in f:
@@ -161,14 +215,18 @@ def main():
         table(rejected,out/'excluded_homozygote_counts.tsv')
         table(pd.DataFrame(excluded,columns=list(s.columns)+['reason']),out/'excluded_mapping.tsv')
         audit.append(dict(tissue=t,significant_pairs=len(s),qualifying_pairs=len(rank),selected_for_plots=len(selected_pairs),excluded_homozygote_counts=len(rejected),mapping_excluded=len(excluded)))
-        # Reconstruct prep_sQTL's sample selection, then restrict to matrix subjects.
-        mt=meta.copy(); mismatch=a.root/t/'eQTL/potential_sex_mismatches.txt'
-        if mismatch.exists(): mt=mt[~mt.externalsampleid.isin(mismatch.read_text().splitlines())]
-        mt=mt[mt.externalsubjectid.isin(subjects)]
-        mt=mt[mt.apply(lambda r:r.astype(str).str.contains(PATTERNS[t],case=False,regex=True).any(),axis=1)]
-        mt['RIN_score']=mt.iloc[:,[16,17]].apply(pd.to_numeric,errors='coerce').fillna(0).max(axis=1)
-        mt=mt[(pd.to_numeric(mt.post_mortem_interval_in_hours,errors='coerce')<=40)&(mt.RIN_score>=3)]
-        mt=mt.sort_values('RIN_score',ascending=False).drop_duplicates('externalsubjectid')
+        mt=None
+        if not a.no_plots:
+            if a.experiment=='answer_ALS':
+                mt=answer_metadata(meta,t,subjects,a.subject_column,a.sample_column)
+            else:
+                mt=meta.copy(); mismatch=a.root/t/'eQTL/potential_sex_mismatches.txt'
+                if mismatch.exists(): mt=mt[~mt.externalsampleid.isin(mismatch.read_text().splitlines())]
+                mt=mt[mt.externalsubjectid.isin(subjects)]
+                mt=mt[mt.apply(lambda r:r.astype(str).str.contains(PATTERNS[t],case=False,regex=True).any(),axis=1)]
+                mt['RIN_score']=mt.iloc[:,[16,17]].apply(pd.to_numeric,errors='coerce').fillna(0).max(axis=1)
+                mt=mt[(pd.to_numeric(mt.post_mortem_interval_in_hours,errors='coerce')<=40)&(mt.RIN_score>=3)]
+                mt=mt.sort_values('RIN_score',ascending=False).drop_duplicates('externalsubjectid')
         picks={}
         for top in selected_pairs.to_dict('records'):
             assert top['n_ref_ref']>=5 and top['n_hom_alt']>=5
@@ -182,6 +240,9 @@ def main():
             rows=[values[key] if label=='geneid' else values[key][order] for key in ids]
             frame=pd.DataFrame(rows,index=ids,columns=subjects);frame.index.name=label
             frame.to_csv(out/name,sep='\t',na_rep='NA')
+        if a.no_plots:
+            print(t,'qualifying',len(rank),'selected',len(selected_pairs),flush=True)
+            continue
         cov=pd.read_csv(q/f'covariates_{t}_encoded.txt',sep='\t',index_col=0)
         cov[subjects].to_csv(out/'top_covariates.tsv',sep='\t',na_rep='NA')
         with (out/'top_snp_locations.tsv').open('w') as f:
@@ -209,7 +270,7 @@ def main():
             if not (out/'top_pairs.tsv').stat().st_size: continue
             cmd=['Rscript',str(a.scripts_dir/'_sQTL_boxplot.R'),str(out/'top_pairs.tsv'),
                  str(out/'top_snp_matrix.tsv'),str(out/'top_splicing_matrix.tsv'),str(out/'top_covariates.tsv'),
-                 str(out/'top_snp_locations.tsv'),str(out),t]
+                 str(out/'top_snp_locations.tsv'),str(out),t,str(raw)]
             with (out/'boxplots.log').open('w') as log:
                 subprocess.run(cmd,stdout=log,stderr=subprocess.STDOUT,check=True)
         for p in plot_jobs:
