@@ -26,16 +26,15 @@ else
 fi
 [[ -z "${QTL_TISSUES:-}" ]] || read -r -a TISSUES <<< "$QTL_TISSUES"
 
-CANDIDATE_MODE="global_fdr"   # global_fdr | tissue_fdr | nominal | all
 H4_REFERENCE=0.80; MIN_SHARED_SNPS=10; MIN_SHARED_FRAC=0.50; SUSIE_L=10; MIN_F=10
 
-export BASE BFILE RAW GWAS GWAS_ORIG CANDIDATE_MODE H4_REFERENCE MIN_SHARED_SNPS MIN_SHARED_FRAC SUSIE_L MIN_F TISSUE_LIST="${TISSUES[*]}"
+export BASE BFILE RAW GWAS GWAS_ORIG H4_REFERENCE MIN_SHARED_SNPS MIN_SHARED_FRAC SUSIE_L MIN_F TISSUE_LIST="${TISSUES[*]}"
 
 Rscript --vanilla - <<'RS'
 suppressPackageStartupMessages({library(data.table); library(susieR); library(coloc); library(ggplot2)})
 
 BASE<-Sys.getenv("BASE"); BFILE<-Sys.getenv("BFILE"); RAW<-Sys.getenv("RAW"); GWAS<-Sys.getenv("GWAS"); GWAS_ORIG<-Sys.getenv("GWAS_ORIG")
-TISSUES<-strsplit(Sys.getenv("TISSUE_LIST")," ")[[1]]; MODE<-Sys.getenv("CANDIDATE_MODE"); H4REF<-as.numeric(Sys.getenv("H4_REFERENCE"))
+TISSUES<-strsplit(Sys.getenv("TISSUE_LIST")," ")[[1]]; H4REF<-as.numeric(Sys.getenv("H4_REFERENCE"))
 MINSHARED<-as.integer(Sys.getenv("MIN_SHARED_SNPS")); MINFRAC<-as.numeric(Sys.getenv("MIN_SHARED_FRAC")); L<-as.integer(Sys.getenv("SUSIE_L")); MINF<-as.numeric(Sys.getenv("MIN_F"))
 comp<-c(A="T",T="A",C="G",G="C"); nch<-function(x) toupper(sub("^chr","",as.character(x),ignore.case=TRUE))
 
@@ -90,12 +89,9 @@ for(tissue in TISSUES){
   snps<-fread(snpfile)
   for(c in intersect(c("gwas_p","FDR_ALS_tissue","FDR_ALS_global"),names(snps))) set(snps,j=c,value=as.numeric(snps[[c]]))
 
-  cand_snps<-switch(MODE,
-    global_fdr=snps[is.finite(FDR_ALS_global)&FDR_ALS_global<.05],
-    tissue_fdr=snps[is.finite(FDR_ALS_tissue)&FDR_ALS_tissue<.05],
-    nominal=snps[is.finite(gwas_p)&gwas_p<.05],
-    all=copy(snps),
-    stop("Unknown CANDIDATE_MODE: ",MODE))
+  # Include all SNPs from the SNP-first eQTL MR table as coloc candidates.
+  # SuSiE/coloc is subsequently restricted by the eQTL relationship filters below.
+  cand_snps<-unique(snps,by="snpid")
 
   if(!nrow(cand_snps)){cat("\n",tissue,": zero candidate SNPs\n",sep=""); next}
 
