@@ -283,7 +283,16 @@ PY
 
   if [[ ! -e "$ESI_OK" ]]; then echo "Updating ESI with native SMR --update-esi"; "$SMR" --beqtl-summary "$BESD" --update-esi "$ESI_POOL"; touch "$ESI_OK"; else echo "ESI already updated; skipping"; fi
   if [[ ! -e "$EPI_OK" ]]; then echo "Updating EPI with native SMR --update-epi"; "$SMR" --beqtl-summary "$BESD" --update-epi "$EPI_POOL"; touch "$EPI_OK"; else echo "EPI already updated; skipping"; fi
-  if [[ ! -e "$FREQ_OK" ]]; then echo "Updating effect-allele frequencies with native SMR --update-freq"; "$SMR" --beqtl-summary "$BESD" --update-freq "$FREQ_POOL"; touch "$FREQ_OK"; else echo "Frequencies already updated; skipping"; fi
+  if [[ ! -e "$FREQ_OK" ]]; then
+    echo "Updating effect-allele frequencies with native SMR --update-freq"
+    FREQ_TMP="${FREQ_POOL}.tmp"
+    awk -F'\t' 'BEGIN{OFS="\t"} NF==4 && $4+0>0 && $4+0<1' "$FREQ_POOL" > "$FREQ_TMP"
+    mv "$FREQ_TMP" "$FREQ_POOL"
+    "$SMR" --beqtl-summary "$BESD" --update-freq "$FREQ_POOL"
+    touch "$FREQ_OK"
+else
+    echo "Frequencies already updated; skipping"
+fi
 
   python3 <<'PY'
 import os,pandas as pd
