@@ -123,15 +123,14 @@ EOF
 
 elif [[ "$EXPERIMENT" == "answer_ALS" ]]; then
 
-    echo "Preparing AnswerALS raw gVCFs for joint genotyping..."
-
-    module load GATK/4.6.1.0-GCCcore-13.3.0-Java-17
+    echo "Preparing AnswerALS raw gVCFs for BCFtools gVCF-aware merging..."
 
     RNA_BASE="$BASE/iPSC_Motor_Neuron/RNAseq/Processed"
     WGS_BASE="$BASE/Blood/WGS/Processed"
     REFERENCE="/home/zw529/donglab/references/genome/Homo_sapiens/UCSC/hg38/Sequence/WholeGenomeFasta/genome.fa"
     EXPECTED_GVCFS=815
 
+    # Keep only the standard chromosomes used for this QTL workflow.
     CHROMS="chr1,chr2,chr3,chr4,chr5,chr6,chr7,chr8,chr9,chr10,chr11,chr12,chr13,chr14,chr15,chr16,chr17,chr18,chr19,chr20,chr21,chr22,chrX,chrY,chrM"
 
     [[ -s "$REFERENCE" ]] || {
@@ -142,23 +141,21 @@ elif [[ "$EXPERIMENT" == "answer_ALS" ]]; then
         echo "[ERROR] Reference FASTA index not found: ${REFERENCE}.fai" >&2
         exit 1
     }
-    [[ -s "${REFERENCE%.fa}.dict" ]] || {
-        echo "[ERROR] GATK sequence dictionary not found: ${REFERENCE%.fa}.dict" >&2
-        exit 1
-    }
 
-    WORK_DIR="$QTL_DIR/gatk_joint_work_${SLURM_JOB_ID:-manual}"
-    CLEAN_GVCF_DIR="$WORK_DIR/gvcfs"
-    DB_DIR="$WORK_DIR/genomicsdb"
-    RAW_JOINT_VCF="$WORK_DIR/joint_genotyped.raw.vcf.gz"
-    GATK_SAMPLE_MAP="$WORK_DIR/gatk_sample_name_map.tsv"
+    # Confirm that all selected chromosomes exist in the reference.
+    for chr in ${CHROMS//,/ }; do
+        if ! cut -f1 "${REFERENCE}.fai" | grep -Fxq "$chr"; then
+            echo "[ERROR] Reference FASTA index is missing $chr: ${REFERENCE}.fai" >&2
+            exit 1
+        fi
+    done
 
-    mkdir -p "$CLEAN_GVCF_DIR" "$WORK_DIR/tmp"
-    : > "$GATK_SAMPLE_MAP"
+    : > "$VCF_LIST"
     : > "$SAMPLE_MAP"
 
-    declare -A seen_vcf_ids
+    declare -A seen_vcf_ids=()
     gvcf_count=0
+    contig_signature=""
 
     for rna_dir in "$RNA_BASE"/*/; do
         [[ -d "$rna_dir" ]] || continue
@@ -189,26 +186,37 @@ elif [[ "$EXPERIMENT" == "answer_ALS" ]]; then
         fi
         seen_vcf_ids["$vcf_id"]="$donor"
 
-        clean_gvcf="$CLEAN_GVCF_DIR/${donor}.g.vcf.gz"
-        subset_gvcf="$CLEAN_GVCF_DIR/${donor}.subset.tmp.vcf.gz"
+        # BCFtools --no-index requires consistent contig order across inputs.
+        current_contigs=$(bcftools view -h "$source_gvcf" |
+            sed -n 's/^##contig=<ID=\([^,>]*\).*/\1/p')
 
-        echo "Preparing $donor from $(basename "$source_gvcf")"
+        if [[ -z "$current_contigs" ]]; then
+            echo "[ERROR] No contig declarations found in $source_gvcf" >&2
+            exit 1
+        fi
 
-        # Keep only the standard chromosomes requested for this QTL workflow.
-        # -t streams the source gVCF, so a source index is not required.
-        bcftools view -t "$CHROMS" -Oz \
-            -o "$subset_gvcf" "$source_gvcf"
+        if ((gvcf_count == 0)); then
+            contig_signature="$current_contigs"
 
-        # Match the contig declarations to the selected reference FASTA.
-        # This removes header contigs absent from the FASTA index.
-        bcftools reheader -f "${REFERENCE}.fai" \
-            -o "$clean_gvcf" "$subset_gvcf"
-        rm "$subset_gvcf"
-        bcftools index -f -t "$clean_gvcf"
+            header=$(bcftools view -h "$source_gvcf")
+            if [[ "$header" != *"##ALT=<ID=NON_REF"* ]]; then
+                echo "[ERROR] Expected a <NON_REF> gVCF header in $source_gvcf" >&2
+                exit 1
+            fi
+            if [[ "$header" != *"##INFO=<ID=END"* ]]; then
+                echo "[ERROR] Expected INFO/END gVCF blocks in $source_gvcf" >&2
+                exit 1
+            fi
+        elif [[ "$current_contigs" != "$contig_signature" ]]; then
+            echo "[ERROR] Contig order differs between AnswerALS gVCFs." >&2
+            echo "[ERROR] BCFtools --no-index requires matching contig order; first mismatch: $source_gvcf" >&2
+            exit 1
+        fi
 
-        printf '%s\t%s\n' "$vcf_id" "$clean_gvcf" >> "$GATK_SAMPLE_MAP"
+        printf '%s\n' "$source_gvcf" >> "$VCF_LIST"
         printf '%s\t%s\n' "$vcf_id" "$donor" >> "$SAMPLE_MAP"
-        ((gvcf_count+=1))
+
+        gvcf_count=$((gvcf_count + 1))
     done
 
     if ((gvcf_count != EXPECTED_GVCFS)); then
@@ -217,44 +225,63 @@ elif [[ "$EXPERIMENT" == "answer_ALS" ]]; then
     fi
 
     echo "Prepared $gvcf_count raw gVCFs."
-    echo "Running GATK GenomicsDBImport..."
+    echo "Merging reference blocks and variants with BCFtools..."
 
-    interval_args=()
-    IFS=',' read -r -a chrom_array <<< "$CHROMS"
-    for chr in "${chrom_array[@]}"; do
-        interval_args+=(-L "$chr")
-    done
+    JOB_TAG="${SLURM_JOB_ID:-manual}"
+    MERGED_TMP="$QTL_DIR/joint_genotyped_GQ.${JOB_TAG}.merged.tmp.vcf.gz"
+    REF_TMP="$QTL_DIR/joint_genotyped_GQ.${JOB_TAG}.refheader.tmp.vcf.gz"
+    SAMPLE_TMP="$QTL_DIR/joint_genotyped_GQ.${JOB_TAG}.samples.tmp.vcf.gz"
 
-    gatk --java-options "-Xms32g -Xmx32g" GenomicsDBImport \
-        -R "$REFERENCE" \
-        --sample-name-map "$GATK_SAMPLE_MAP" \
-        --genomicsdb-workspace-path "$DB_DIR" \
-        --batch-size 50 \
-        --reader-threads 4 \
-        --tmp-dir "$WORK_DIR/tmp" \
-        "${interval_args[@]}"
+    # --gvcf uses INFO/END blocks to recover reference genotypes at variant sites.
+    # --no-index avoids building 815 separate indexes; contig order was checked above.
+    # -t limits records to the canonical chromosomes in the selected UCSC reference.
+    # Do not use --missing-to-ref: only explicit gVCF reference blocks support 0/0 calls.
+    bcftools merge \
+        --gvcf "$REFERENCE" \
+        --no-index \
+        --targets "$CHROMS" \
+        --merge 'both,*' \
+        --file-list "$VCF_LIST" \
+        --output-type u |
+    bcftools view \
+        --types snps,indels,mnps \
+        --output-type u |
+    bcftools annotate \
+        -x INFO,^FORMAT/GT,FORMAT/GQ \
+        --threads 8 \
+        --output-type z \
+        --output "$MERGED_TMP"
 
-    echo "Running GATK GenotypeGVCFs..."
-    gatk --java-options "-Xms32g -Xmx32g" GenotypeGVCFs \
-        -R "$REFERENCE" \
-        -V "gendb://${DB_DIR}" \
-        -O "$RAW_JOINT_VCF" \
-        "${interval_args[@]}"
+    echo "Updating contig header to match the selected reference..."
+    bcftools reheader -f "${REFERENCE}.fai" \
+        -o "$REF_TMP" "$MERGED_TMP"
 
-    echo "Keeping GT and GQ fields and renaming samples to AnswerALS donor IDs..."
-    bcftools annotate -x INFO,^FORMAT/GT,FORMAT/GQ \
-        "$RAW_JOINT_VCF" -Oz -o "${FINAL_VCF}.tmp"
-
+    echo "Reheadering sequencing IDs to AnswerALS donor IDs..."
     bcftools reheader -s "$SAMPLE_MAP" \
-        -o "$FINAL_VCF" "${FINAL_VCF}.tmp"
-    rm "${FINAL_VCF}.tmp"
-    tabix -f -p vcf "$FINAL_VCF"
+        -o "$SAMPLE_TMP" "$REF_TMP"
 
-    final_sample_count=$(bcftools query -l "$FINAL_VCF" | wc -l)
+    final_sample_count=$(bcftools query -l "$SAMPLE_TMP" | awk 'END {print NR}')
     if ((final_sample_count != EXPECTED_GVCFS)); then
         echo "[ERROR] Final VCF has $final_sample_count samples; expected $EXPECTED_GVCFS." >&2
         exit 1
     fi
+
+    bcftools index -f -t "$SAMPLE_TMP"
+    mv "$SAMPLE_TMP" "$FINAL_VCF"
+    mv "${SAMPLE_TMP}.tbi" "${FINAL_VCF}.tbi"
+
+    rm -f "$MERGED_TMP" "$REF_TMP"
+
+    final_variant_count=$(bcftools index --stats "$FINAL_VCF" |
+        awk '{n += $3} END {print n+0}')
+
+    if ((final_variant_count == 0)); then
+        echo "[ERROR] Final VCF contains zero variant records: $FINAL_VCF" >&2
+        exit 1
+    fi
+
+    echo "AnswerALS samples in final VCF: $final_sample_count"
+    echo "AnswerALS variant records in final VCF: $final_variant_count"
 
 else
     echo "[ERROR] EXPERIMENT must be target_ALS or answer_ALS." >&2
