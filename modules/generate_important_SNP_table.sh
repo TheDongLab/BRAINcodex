@@ -22,6 +22,8 @@ done
 
 python -u - "$GWAS" "$ROOT" "$OUTDIR" "$GTF" <<'PY'
 import sys
+import csv
+import os
 import re
 from pathlib import Path
 from collections import defaultdict
@@ -35,6 +37,8 @@ OUTDIR=Path(sys.argv[3])
 GTF=Path(sys.argv[4])
 
 TISSUES=[
+    "Cortex",
+    "Spinal_Cord",
     "Cerebellum",
     "Frontal_Cortex",
     "Cervical_Spinal_Cord",
@@ -43,6 +47,24 @@ TISSUES=[
 ]
 
 QTLS=["eQTL","sQTL","cQTL"]
+
+ALS_GENES = {x.upper() for x in [
+    "ATXN1", "ATXN2", "HOMER1", "C9orf72", "SOD1", "FUS",
+    "STMN2", "TARDBP", "TBK1", "UNC13A"
+]}
+RBP_FILE = Path.home() / "donglab/references/genome/Homo_sapiens/RBP2GO/RNA_binding_proteins/RNABP_list.csv"
+if not RBP_FILE.is_file():
+    raise FileNotFoundError(f"Missing RNA-binding protein list: {RBP_FILE}")
+rbp_table = pd.read_csv(RBP_FILE, comment="#", dtype=str)
+if "Gene_Name" not in rbp_table.columns:
+    raise RuntimeError("RNA-binding protein list requires a Gene_Name column")
+RBP_GENES = set(rbp_table["Gene_Name"].dropna().str.strip().str.upper())
+RBP_GENES.discard("")
+
+# Gene-list points use only targets in the significant QTL input files.
+# Keep these separate from candidate genes pooled across SMR/coloc results.
+significant_qtl_gene_symbols = defaultdict(set)
+
 
 # ------------------------------------------------------------------
 # HELPERS
@@ -547,6 +569,8 @@ for tissue in TISSUES:
                         snp,
                         g
                     )
+                    if g.get("gene_symbol"):
+                        significant_qtl_gene_symbols[snp].add(g["gene_symbol"])
 
             # Preserve any explicit gene-symbol column too.
             if gc:
@@ -555,6 +579,7 @@ for tissue in TISSUES:
                 )
 
                 if symbol:
+                    significant_qtl_gene_symbols[snp].add(symbol)
                     g=GENE_BY_SYMBOL.get(
                         norm(symbol)
                     )
@@ -822,8 +847,7 @@ for tissue in TISSUES:
 # ------------------------------------------------------------------
 # 4. SuSiE / COLOC
 #
-# Search recursively because the three pipelines write multiple
-# per-locus/global TSV files under each *_SuSiE_coloc directory.
+# Search recursively because the three pipelines write multiple per-locus/global TSV files under each *_SuSiE_coloc directory.
 # ------------------------------------------------------------------
 
 for tissue in TISSUES:
@@ -1137,6 +1161,192 @@ out["candidate_genes"]=[
     for snp in out.index
 ]
 
+# Gene-list matches are case insensitive; retain original symbols in output.
+for label, gene_list in [("ALS_relevant_gene", ALS_GENES), ("RNA_binding_protein", RBP_GENES)]:
+    matches = [
+        sorted(s for s in significant_qtl_gene_symbols.get(snp, set())
+               if s.upper() in gene_list)
+        for snp in out.index
+    ]
+    out[f"{label}_matches"] = [";".join(v) for v in matches]
+    out[label] = [bool(v) for v in matches]
+
+# Observed homozygote differences, using the supplied ranking-script rules
+# Optional TSV named by QTL_MATRIX_CONFIG: tissue, qtl_type, matrix_path, scale. scale must be zscore (eQTL), fraction or percent (sQTL/cQTL)
+# Paths may contain {tissue} and {root}. sQTL has a confirmed default
+MIN_HOMOZYGOTES = 5
+THRESHOLDS = {"eQTL": 0.5, "sQTL": 0.5, "cQTL": 0.1}
+config = {}
+config_file = os.environ.get("QTL_MATRIX_CONFIG")
+if config_file:
+    cfg = pd.read_csv(Path(config_file).expanduser(), sep="\t", dtype=str, keep_default_na=False)
+    required = {"tissue", "qtl_type", "matrix_path", "scale"}
+    if not required.issubset(cfg.columns):
+        raise ValueError(f"Matrix configuration requires columns: {sorted(required)}")
+    for r in cfg.to_dict("records"):
+        key = (r["tissue"], r["qtl_type"])
+        if key in config:
+            raise ValueError(f"Duplicate matrix configuration: {key}")
+        if key[0] not in TISSUES or key[1] not in QTLS:
+            raise ValueError(f"Unknown tissue/QTL in configuration: {key}")
+        allowed = {"zscore"} if key[1] == "eQTL" else {"fraction", "percent"}
+        if r["scale"] not in allowed:
+            raise ValueError(f"Invalid scale for {key}: expected {allowed}")
+        config[key] = (Path(r["matrix_path"].format(root=ROOT, tissue=key[0])).expanduser(), r["scale"])
+
+def selected_matrix(path, wanted):
+    values = {}
+    with path.open() as handle:
+        samples = handle.readline().rstrip("\r\n").split("\t")[1:]
+        if not samples or len(samples) != len(set(samples)):
+            raise ValueError(f"Empty/duplicate sample IDs: {path}")
+        for line in handle:
+            key, _, tail = line.rstrip("\r\n").partition("\t")
+            if key not in wanted:
+                continue
+            if key in values:
+                raise ValueError(f"Duplicate matrix row {key}: {path}")
+            v = pd.to_numeric(pd.Series(tail.split("\t")), errors="coerce").to_numpy(dtype=float)
+            if len(v) != len(samples):
+                raise ValueError(f"Wrong matrix row length {key}: {path}")
+            values[key] = v
+    return samples, values
+
+jobs = []
+audit = []
+def audit_failure(t, q, pairs, reason):
+    for snp, trait in pairs:
+        audit.append(dict(SNP=snp, tissue=t, qtl_type=q, trait=trait, status=reason, passes=False))
+
+# Use all significant pairs, not only the top-for-boxplot subset.
+for t in TISSUES:
+    for q in QTLS:
+        # Re-read significant rows to retain exact tissue/SNP/trait pairs.
+        sigpath = ROOT/t/q/"results"/f"{t}_{q}.FDR0.05.txt"
+        if not sigpath.exists():
+            continue
+        sig = read_table(sigpath)
+        sc = find_col(sig.columns, ["snpid", "snp_id", "snp", "rsid", "variant"], required=True)
+        tc = find_col(sig.columns, ["geneid", "gene_id", "junction_id", "junctionid", "circ_id", "circid", "phenotype_id", "probeid", "event_id"])
+        if tc is None:
+            pairs = sorted({(clean_snp(v), "") for v in sig[sc] if clean_snp(v) in out.index})
+            audit_failure(t, q, pairs, "missing_trait_column")
+            continue
+        pairs = sorted({(clean_snp(r[sc]), clean_value(r[tc])) for r in sig.to_dict("records")
+                        if clean_snp(r[sc]) in out.index and clean_value(r[tc]) is not None})
+        if not pairs:
+            continue
+        setting = config.get((t, q))
+        if setting is None and q == "sQTL":
+            setting = (ROOT/t/q/f"splicing_{t}.txt", "fraction")
+        if setting is None:
+            audit_failure(t, q, pairs, "matrix_configuration_required")
+            continue
+        matrix_path, scale = setting
+        genotype_path = ROOT/t/q/f"snp_{t}.txt"
+        locpath = ROOT/t/q/"snp_location.txt"
+        if not all(f.is_file() for f in (matrix_path, genotype_path, locpath)):
+            audit_failure(t, q, pairs, "missing_input_file")
+            print(f"Genotype comparison inputs missing: {t} {q}: {matrix_path}, {genotype_path}, {locpath}", flush=True)
+            continue
+        wanted = {snp for snp, trait in pairs}
+        locations = {}
+        with locpath.open() as handle:
+            for r in csv.DictReader(handle, delimiter="\t"):
+                if r["snpid"] in wanted:
+                    k = (chr_key(r["chr"]), int(r["pos"]))
+                    if r["snpid"] in locations and locations[r["snpid"]] != k:
+                        raise ValueError(f"Ambiguous SNP location: {r['snpid']}")
+                    locations[r["snpid"]] = k
+        jobs.append((t, q, pairs, matrix_path, scale, genotype_path, locations))
+
+# Read the PLINK header once; reject ambiguous coordinates, as in ranking script.
+alleles = defaultdict(set)
+raw = ROOT/"QTL/plink/joint_all_chrs_matrixEQTL.raw"
+targets = {k for job in jobs for k in job[-1].values()}
+if jobs and raw.is_file():
+    with raw.open() as handle:
+        for token in handle.readline().split()[6:]:
+            m = re.fullmatch(r"(?:chr)?([^:]+):(\d+):([^:]+):([^_]+)_(.+)", token)
+            if m:
+                c, pos, ref, alt, counted = m.groups()
+                k = (chr_key(c), int(pos))
+                if k in targets:
+                    alleles[k].add((ref, alt, counted))
+
+for t, q, pairs, matrix_path, scale, genotype_path, locations in jobs:
+    if not raw.is_file():
+        audit_failure(t, q, pairs, "missing_plink_allele_header")
+        continue
+    subjects, phenotypes = selected_matrix(matrix_path, {trait for snp, trait in pairs})
+    gs, genotypes = selected_matrix(genotype_path, {snp for snp, trait in pairs})
+    if set(gs) != set(subjects):
+        raise ValueError(f"Phenotype/genotype subject sets differ: {t} {q}")
+    gi = {v: i for i, v in enumerate(gs)}
+    order = [gi[v] for v in subjects]
+    for snp, trait in pairs:
+        r = dict(SNP=snp, tissue=t, qtl_type=q, trait=trait,
+                 matrix_path=str(matrix_path), input_scale=scale,
+                 threshold=THRESHOLDS[q], passes=False)
+        aa = alleles.get(locations.get(snp), set())
+        if trait not in phenotypes or snp not in genotypes:
+            r["status"] = "missing_matrix_row"
+        elif len(aa) != 1:
+            r["status"] = "missing_or_ambiguous_alleles"
+        else:
+            ref, alt, counted = next(iter(aa))
+            if counted not in (ref, alt) or "," in alt or ref == alt:
+                r["status"] = "unsupported_alleles"
+            else:
+                x = phenotypes[trait]
+                g = genotypes[snp][order]
+                if np.any(np.isfinite(g) & ~np.isin(g, [0, 1, 2])):
+                    raise ValueError(f"Non-hardcall genotype: {t} {q} {snp}")
+                if scale != "zscore":
+                    limit = 1 if scale == "fraction" else 100
+                    if np.any(np.isfinite(x) & ((x < 0) | (x > limit))):
+                        raise ValueError(f"Phenotype outside declared {scale} range: {t} {q} {trait}")
+                altg = 2-g if counted == ref else g
+                x = x * 100 if scale == "fraction" else x
+                r.update(ref=ref, alt=alt, plink_counted_allele=counted,
+                         units="zscore" if q == "eQTL" else "percentage_points")
+                for value, label in [(0, "ref_ref"), (1, "het"), (2, "hom_alt")]:
+                    v = x[(altg == value) & np.isfinite(x)]
+                    r["n_"+label] = len(v)
+                    r["mean_"+label] = float(v.mean()) if len(v) else np.nan
+                r["delta_alt_minus_ref"] = r["mean_hom_alt"] - r["mean_ref_ref"]
+                r["abs_delta"] = abs(r["delta_alt_minus_ref"])
+                if min(r["n_ref_ref"], r["n_hom_alt"]) < MIN_HOMOZYGOTES:
+                    r["status"] = "fewer_than_5_in_one_or_both_homozygote_groups"
+                else:
+                    r["status"] = "evaluated"
+                    r["passes"] = bool(r["abs_delta"] >= THRESHOLDS[q])
+        audit.append(r)
+
+columns = ["SNP", "tissue", "qtl_type", "trait", "status", "passes", "matrix_path", "input_scale",
+           "threshold", "ref", "alt", "plink_counted_allele", "units", "n_ref_ref", "n_het",
+           "n_hom_alt", "mean_ref_ref", "mean_het", "mean_hom_alt", "delta_alt_minus_ref", "abs_delta"]
+differences = pd.DataFrame(audit).reindex(columns=columns)
+differences.to_csv(OUTDIR/"ALS_genotype_difference_audit.tsv", sep="\t", index=False, na_rep="NA")
+evaluated_snps = set(differences.loc[differences.status.eq("evaluated"), "SNP"])
+passing = differences[differences.passes.eq(True)]
+passing_snps = set(passing.SNP)
+out["large_genotype_difference"] = [snp in passing_snps for snp in out.index]
+out["large_genotype_difference_status"] = [
+    "PASS" if snp in passing_snps else "NO_PASS_AMONG_EVALUATED" if snp in evaluated_snps else "NOT_EVALUATED"
+    for snp in out.index
+]
+pass_details = defaultdict(set)
+for r in passing.to_dict("records"):
+    pass_details[r["SNP"]].add(f"{r['qtl_type']}|{r['tissue']}|{r['trait']}")
+out["large_genotype_difference_matches"] = [";".join(sorted(pass_details[snp])) for snp in out.index]
+for q in QTLS:
+    sub = differences[(differences.qtl_type == q) & differences.status.eq("evaluated")]
+    best = sub.groupby("SNP").abs_delta.max()
+    out[f"{q}_max_abs_homozygote_difference"] = out["SNP"].map(best)
+print(f"Genotype difference audit: {OUTDIR/'ALS_genotype_difference_audit.tsv'}", flush=True)
+print("Genotype comparison statuses:", differences.status.value_counts().to_dict(), flush=True)
+
 # ------------------------------------------------------------------
 # 6. EVIDENCE COUNTS
 #
@@ -1145,6 +1355,9 @@ out["candidate_genes"]=[
 
 score_cols=[
     "GWAS_sig",
+    "ALS_relevant_gene",
+    "RNA_binding_protein",
+    "large_genotype_difference",
 
     "eQTL_significant",
     "sQTL_significant",
