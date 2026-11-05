@@ -39,6 +39,7 @@ GTF=Path(sys.argv[4])
 TISSUES=[
     "Cortex",
     "Spinal_Cord",
+    "Thoracic_Spinal_Cord",
     "Cerebellum",
     "Frontal_Cortex",
     "Cervical_Spinal_Cord",
@@ -49,9 +50,18 @@ TISSUES=[
 QTLS=["eQTL","sQTL","cQTL"]
 
 ALS_GENES = {x.upper() for x in [
-    "ATXN1", "ATXN2", "HOMER1", "C9orf72", "SOD1", "FUS",
-    "STMN2", "TARDBP", "TBK1", "UNC13A"
+    'ATXN1', 'ATXN2', 'HOMER1', 'C9ORF72', 'SOD1', 'FUS',
+    'STMN2', 'TARDBP', 'TBK1', 'UNC13A', 'ACSL5', 'ALS2',
+    'ANG', 'ANXA11', 'C21ORF2', 'CAV1', 'CCNF', 'CHCHD10',
+    'CHMP2B', 'CHRNA3', 'DAO', 'DCTN1', 'DNAJC7', 'ELP3',
+    'ERBB4', 'EWSR1', 'FIG4', 'GLE1', 'GLT8D1', 'HNRNPA1',
+    'HNRNPA2B1', 'KANK1', 'KIF5A', 'LGALSL', 'MATR3', 'MOBP',
+    'NEFH', 'NEK1', 'NIPA1', 'OPTN', 'PARK9', 'PFN1',
+    'PON1', 'PON2', 'PON3', 'PRPH', 'SARM1', 'SCFD1',
+    'SETX', 'SIGMAR1', 'SPG11', 'SPTLC1', 'SQSTM1', 'TAF15',
+    'TIA1', 'TUBA4A', 'UBQLN2', 'VAPB', 'VCP', 'WDR7',
 ]}
+# Keep user labels; resolve aliases through the same GENCODE gene IDs where possible.
 RBP_FILE = Path.home() / "donglab/references/genome/Homo_sapiens/RBP2GO/RNA_binding_proteins/RNABP_list.csv"
 if not RBP_FILE.is_file():
     raise FileNotFoundError(f"Missing RNA-binding protein list: {RBP_FILE}")
@@ -847,7 +857,8 @@ for tissue in TISSUES:
 # ------------------------------------------------------------------
 # 4. SuSiE / COLOC
 #
-# Search recursively because the three pipelines write multiple per-locus/global TSV files under each *_SuSiE_coloc directory.
+# Search recursively because the three pipelines write multiple
+# per-locus/global TSV files under each *_SuSiE_coloc directory.
 # ------------------------------------------------------------------
 
 for tissue in TISSUES:
@@ -1072,15 +1083,14 @@ for tissue in TISSUES:
                         r[csc]
                     ).strip().lower()
 
-                    if v not in {
-                        "",
-                        "nan",
-                        "na",
-                        "none",
-                        "false",
-                        "0",
-                        "no"
-                    }:
+                    is_member = v in {"true", "t", "yes", "y"}
+                    if not is_member:
+                        try:
+                            cs_number = float(v)
+                            is_member = np.isfinite(cs_number) and cs_number > 0 and cs_number.is_integer()
+                        except (TypeError, ValueError):
+                            pass
+                    if is_member:
                         out.at[
                             snp,
                             f"{q}_SuSiE_credible_set"
@@ -1161,8 +1171,11 @@ out["candidate_genes"]=[
     for snp in out.index
 ]
 
+# Include current symbols for user-provided alternate gene labels.
+# GENCODE may use ATP13A2 for PARK9 and CFAP410 for C21orf2.
+ALS_GENE_MATCH_NAMES = ALS_GENES | {"ATP13A2", "CFAP410"}
 # Gene-list matches are case insensitive; retain original symbols in output.
-for label, gene_list in [("ALS_relevant_gene", ALS_GENES), ("RNA_binding_protein", RBP_GENES)]:
+for label, gene_list in [("ALS_relevant_gene", ALS_GENE_MATCH_NAMES), ("RNA_binding_protein", RBP_GENES)]:
     matches = [
         sorted(s for s in significant_qtl_gene_symbols.get(snp, set())
                if s.upper() in gene_list)
@@ -1171,9 +1184,10 @@ for label, gene_list in [("ALS_relevant_gene", ALS_GENES), ("RNA_binding_protein
     out[f"{label}_matches"] = [";".join(v) for v in matches]
     out[label] = [bool(v) for v in matches]
 
-# Observed homozygote differences, using the supplied ranking-script rules
-# Optional TSV named by QTL_MATRIX_CONFIG: tissue, qtl_type, matrix_path, scale. scale must be zscore (eQTL), fraction or percent (sQTL/cQTL)
-# Paths may contain {tissue} and {root}. sQTL has a confirmed default
+# Observed homozygote differences, using the supplied ranking-script rules.
+# Optional TSV named by QTL_MATRIX_CONFIG: tissue, qtl_type, matrix_path, scale.
+# scale must be zscore (eQTL), fraction or percent (sQTL/cQTL).
+# Paths may contain {tissue} and {root}. sQTL has a confirmed default.
 MIN_HOMOZYGOTES = 5
 THRESHOLDS = {"eQTL": 0.5, "sQTL": 0.5, "cQTL": 0.1}
 config = {}
@@ -1347,6 +1361,30 @@ for q in QTLS:
 print(f"Genotype difference audit: {OUTDIR/'ALS_genotype_difference_audit.tsv'}", flush=True)
 print("Genotype comparison statuses:", differences.status.value_counts().to_dict(), flush=True)
 
+# SCREEN annotation: all significant sQTL overlaps, without top-10 filtering.
+screen_file = ROOT/"QTL/SCREEN_sQTL_PSI_ranking/SCREEN_overlaps.tsv"
+if not screen_file.is_file():
+    raise FileNotFoundError(f"Required SCREEN overlap table missing: {screen_file}. Run the SCREEN script first.")
+screen = pd.read_csv(screen_file, sep="\t", dtype=str, keep_default_na=False)
+required_screen = {"tissue", "junction_id", "snpid", "regulatory_class", "cCRE_id", "interval_bed"}
+if not required_screen.issubset(screen.columns):
+    raise ValueError(f"SCREEN table requires columns: {sorted(required_screen)}")
+screen = screen[screen["tissue"].isin(TISSUES) & screen["regulatory_class"].isin(["PLS", "pELS", "dELS"])]
+screen_sets = {k: defaultdict(set) for k in ["tissues", "classes", "cCRE_ids", "intervals_bed", "traits", "matches"]}
+for r in screen.to_dict("records"):
+    snp = clean_snp(r["snpid"])
+    if snp not in out.index:
+        continue
+    for key, value in [("tissues", r["tissue"]), ("classes", r["regulatory_class"]),
+                       ("cCRE_ids", r["cCRE_id"]), ("intervals_bed", r["interval_bed"]),
+                       ("traits", r["junction_id"]),
+                       ("matches", "|".join(r[k] for k in ["tissue", "junction_id", "regulatory_class", "cCRE_id", "interval_bed"]))]:
+        if value:
+            screen_sets[key][snp].add(value)
+out["SCREEN_regulatory_overlap"] = [bool(screen_sets["matches"].get(snp)) for snp in out.index]
+for key, values in screen_sets.items():
+    out[f"SCREEN_{key}"] = [";".join(sorted(values.get(snp, set()))) for snp in out.index]
+
 # ------------------------------------------------------------------
 # 6. EVIDENCE COUNTS
 #
@@ -1358,6 +1396,7 @@ score_cols=[
     "ALS_relevant_gene",
     "RNA_binding_protein",
     "large_genotype_difference",
+    "SCREEN_regulatory_overlap",
 
     "eQTL_significant",
     "sQTL_significant",
@@ -1380,6 +1419,8 @@ score_cols=[
     "cQTL_SuSiE_credible_set"
 ]
 
+pd.DataFrame({"scored_category": score_cols, "points_if_true": 1}).to_csv(
+    OUTDIR/"ALS_evidence_scoring_categories.tsv", sep="\t", index=False)
 out["evidence_count"]=(
     out[
         score_cols
@@ -1432,6 +1473,11 @@ out["any_SuSiE_credible_set"]=(
 out["any_evidence"]=(
     out["evidence_count"]>0
 )
+
+out["evidence_categories"] = [
+    ";".join(c for c in score_cols if bool(row[c]))
+    for row in out[score_cols].to_dict("records")
+]
 
 # ------------------------------------------------------------------
 # 7. VALIDATION PRIORITY
@@ -1627,12 +1673,8 @@ ranked=ranked.drop(
     ]
 )
 
-ranked.to_csv(
-    rankfile,
-    sep="\t",
-    index=False
-)
-
+ranked.insert(0, "priority_rank", np.arange(1, len(ranked)+1))
+ranked.to_csv(rankfile, sep="\t", index=False)
 # ------------------------------------------------------------------
 # SUMMARY
 # ------------------------------------------------------------------
@@ -1670,6 +1712,7 @@ print(
     f"SNPs in SuSiE credible set : {int(out['any_SuSiE_credible_set'].sum()):,}"
 )
 
+print(f"SNPs with SCREEN overlap    : {int(out['SCREEN_regulatory_overlap'].sum()):,}")
 print(
     f"SNPs with candidate genes  : {(out['candidate_gene_ids']!='').sum():,}"
 )
