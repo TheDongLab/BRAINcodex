@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # BOXPLOT_VERSION: EXACT_COPY_OF_ORIGINAL_BASE_R_PARAMETERS__MATCHED_TRACK_SUBJECTS_ONLY
+# CIRC_PERCENT_VERSION: GENOTYPE_MEAN_FRACTION_TIMES_100
 # GENCODE_TRACK_VERSION: ALL_TRANSCRIPTS_TRANSCRIPT_RESOLVED
 
 import os,re,csv,sys,math,warnings,subprocess
@@ -299,6 +300,18 @@ def mean_junction_rpm(group,chrom,start,end,MIN_MEAN_JUNCTION_RPM,MAX_JUNCTIONS)
         keep=sorted(means,key=means.get,reverse=True)[:MAX_JUNCTIONS];means={k:means[k] for k in keep}
     return means,n
 
+def genotype_panel_title(group,genotype,qtype):
+    title=f"{GENOTYPE_LABELS[genotype]} (N={len(group)})"
+    if qtype!="cQTL":return title
+    # Match run_cQTL_circ_difference.sh: average per-subject fractions,
+    # then multiply by 100 for display; this is not a ratio of pooled reads.
+    values=[r["circ_percent_file"] for r in group
+            if r["circ_percent_file"] is not None
+            and math.isfinite(r["circ_percent_file"]) and 0<=r["circ_percent_file"]<=1]
+    title+=f" | mean circ={100*sum(values)/len(values):.3f}%" if values else " | mean circ=NA"
+    if len(values)!=len(group):title+=f" (quant N={len(values)}/{len(group)})"
+    return title
+
 def circ_quant_file(sd):return sd/"circularRNA_known_circ_percentage.txt"
 def read_circ_quant(path,chrom,start,end,strand,tol):
     if not path.exists():return None
@@ -561,10 +574,10 @@ for tissue,hits in hits_by_tissue.items():
                 if valid:circ[g]=sum(0 if r["circ_rpm"] is None else r["circ_rpm"] for r in valid)/len(valid)
 
         with open(tsv,"w",newline="") as f:
-            w=csv.writer(f,delimiter="\t");w.writerow(["tissue","qtl_type","event","gene_symbol","snp","smr_p","smr_fdr","heidi_p","heidi_nsnp","ref","alt","qtl_id","subject_id","metadata_sample_id","filesystem_sample_id","genotype_group","genotype_label","phenotype","is_als","primary_reads","plus_track_source","minus_track_source","circ_reads","circ_rpm"])
-            for r in complete:w.writerow([tissue,TYPE,event,symbol,snp,p_smr,fdr,"" if p_heidi is None else p_heidi,nheidi,allele["ref"],allele["alt"],r["qtl_id"],r["subject_id"],r["sample_id"],r["sample_fs_id"],r["genotype"],GENOTYPE_LABELS[r["genotype"]],r["phenotype"],r["is_als"],r["primary_reads"] or "",r["plus_source"],r["minus_source"],r["circ_reads"] or "",r["circ_rpm"] or ""])
+            w=csv.writer(f,delimiter="\t");w.writerow(["tissue","qtl_type","event","gene_symbol","snp","smr_p","smr_fdr","heidi_p","heidi_nsnp","ref","alt","qtl_id","subject_id","metadata_sample_id","filesystem_sample_id","genotype_group","genotype_label","phenotype","is_als","primary_reads","plus_track_source","minus_track_source","circ_reads","circ_rpm","circ_percent_file","circ_quant_source","circ_match_type"])
+            for r in complete:w.writerow([tissue,TYPE,event,symbol,snp,p_smr,fdr,"" if p_heidi is None else p_heidi,nheidi,allele["ref"],allele["alt"],r["qtl_id"],r["subject_id"],r["sample_id"],r["sample_fs_id"],r["genotype"],GENOTYPE_LABELS[r["genotype"]],r["phenotype"],r["is_als"],r["primary_reads"] or "",r["plus_source"],r["minus_source"],r["circ_reads"] or "",r["circ_rpm"] or "","" if r["circ_percent_file"] is None else r["circ_percent_file"],r["circ_quant_source"],r["circ_match_type"]])
 
-        if not OVERWRITE and pdf.exists() and png.exists() and svg.exists():print("  DENSITY EXISTS; boxplot/TSV refreshed, density skipped");continue
+        if TYPE!="cQTL" and not OVERWRITE and pdf.exists() and png.exists() and svg.exists():print("  DENSITY EXISTS; boxplot/TSV refreshed, density skipped");continue
         cmax=max(max(float(np.max(plus[g])),float(np.max(minus[g]))) for g in groups if groups[g]);cmax=1 if cmax<=0 else cmax*1.05
         linear=TYPE in {"sQTL","cQTL"} and any(junctions.get(g) for g in groups);circular=TYPE=="cQTL" and any(circ[g]>0 for g in groups)
         extent=cmax*(2.05 if circular else 1.80 if linear else 1.08);width=binbp*.92
@@ -581,7 +594,7 @@ for tissue,hits in hits_by_tissue.items():
             ax.axhline(0,color="#555555",lw=.8);ax.axvspan(tstart,tend,alpha=.10,color="#999999")
             if pstart<=snp_pos<=pend:ax.axvline(snp_pos,ls="--",lw=1.3,color="black",alpha=.8)
             ax.set_xlim(pstart,pend);ax.set_ylim(-extent,extent);ax.yaxis.set_major_formatter(FuncFormatter(density_formatter))
-            ax.set_title(f"{GENOTYPE_LABELS[g]} (N={counts[g]})",loc="left",fontsize=13,color=TRACK_COLORS[g],y=.84,pad=0)
+            ax.set_title(genotype_panel_title(groups[g],g,TYPE),loc="left",fontsize=13,color=TRACK_COLORS[g],y=.84,pad=0)
             ax.tick_params(axis="x",labelbottom=False);ax.tick_params(axis="y",labelsize=11);ax.spines["top"].set_visible(False);ax.spines["right"].set_visible(False)
             ax.text(.995,.94,"Forward (+)",transform=ax.transAxes,ha="right",va="top",fontsize=10);ax.text(.995,.06,"Reverse (-)",transform=ax.transAxes,ha="right",va="bottom",fontsize=10)
         ref=fig.add_subplot(gs[3,0],sharex=axes[0]);draw_reference_track(ref,exons,pstart,pend);ref.axvspan(tstart,tend,alpha=.10,color="#999999")
@@ -593,7 +606,7 @@ for tissue,hits in hits_by_tissue.items():
         footer=(f"SMR p={p_smr:.3e} | SMR FDR={fdr:.4g} | HEIDI p={format_p(p_heidi)} | HEIDI SNPs={nheidi if not missing(nheidi) else 'NA'} | HEIDI not used for filtering\n"
                 f"Trait: {chrom}:{tstart:,}-{tend:,} | flank: {flank:,} bp each side | shaded region = trait locus | dashed vertical line = {snp} | coverage bin width ≈ {round(binbp)} bp\n"
                 "Coverage uses the same RPM normalization as the source BigWigs (1e6 / primary alignments); + strand above 0, - strand below 0")
-        if TYPE=="cQTL":footer+="\nLinear splice junctions = solid arcs | circular/back-splice junction = dashed arc | labels = mean junction RPM per subject"
+        if TYPE=="cQTL":footer+="\nPanel mean circ = 100 × mean per-subject circ_percent; missing/invalid quantification excluded (quant N shown when different).\nLinear splice junctions = solid arcs | circular/back-splice junction = dashed arc | labels = mean junction RPM per subject"
         elif TYPE=="sQTL":footer+="\nArc labels = mean LeafCutter junction RPM per subject"
         fig.text(.5,.004,footer,ha="center",va="bottom",fontsize=9.5)
         fig.savefig(pdf,bbox_inches="tight");fig.savefig(png,dpi=DPI,bbox_inches="tight");fig.savefig(svg,bbox_inches="tight");plt.close(fig)
