@@ -22,7 +22,7 @@ BFILE="$PLINK_DIR/joint_all_chrs_filtered_bed"; RAW="$PLINK_DIR/joint_all_chrs_m
 GWAS="$HOME/donglab/references/GWAS/ALS/harmonised/34873335-GCST90027163-MONDO_0004976.h.tsv.gz"
 OUTROOT="${CIRC_MR_ROOT:-$HOME/donglab/data/GCST90027163/GWAS/circ_eQTL_harmonization}"
 if [[ "$EXPERIMENT" == "target_ALS" ]]; then
-    TISSUES=(Cervical_Spinal_Cord Lumbar_Spinal_Cord Motor_Cortex Frontal_Cortex Cerebellum)
+    TISSUES=(Spinal_Cord Cortex Cervical_Spinal_Cord Lumbar_Spinal_Cord Motor_Cortex Frontal_Cortex Cerebellum)
     SUMMARY="$OUTROOT/all_tissues_SNP_first_summary.tsv"
 else
     TISSUES=(iPSC_Motor_Neuron)
