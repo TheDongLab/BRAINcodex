@@ -22,7 +22,7 @@ GLOBAL="$BASE/MR/circ_eQTL_MR"
 ROOT="${CIRC_MR_ROOT:-$HOME/donglab/data/GCST90027163/GWAS/circ_eQTL_harmonization}"
 
 if [[ "$EXPERIMENT" == "target_ALS" ]]; then
-    TISSUES=(Cervical_Spinal_Cord Lumbar_Spinal_Cord Motor_Cortex Frontal_Cortex Cerebellum)
+    TISSUES=(Spinal_Cord Cortex Cervical_Spinal_Cord Lumbar_Spinal_Cord Motor_Cortex Frontal_Cortex Cerebellum)
 else
     TISSUES=(iPSC_Motor_Neuron)
 fi
