@@ -242,10 +242,6 @@ finalize_joint_vcf() {
 MODE="${1:-submit}"
 
 if [[ "$MODE" == "submit" ]]; then
-    if [[ -n "${SLURM_JOB_ID:-}" ]]; then
-        echo "[ERROR] Run the wrapper from a login shell with bash, not via sbatch." >&2
-        exit 1
-    fi
 
     mkdir -p "$CHROM_DIR"
     RUN_ID="answerALS_$(date +%Y%m%d_%H%M%S)_$$"
@@ -255,8 +251,8 @@ if [[ "$MODE" == "submit" ]]; then
 
     PREP_JOB=$(sbatch --parsable \
         --job-name=answerALS_gvcf_prep \
-        --partition=week \
-        --time=1-00:00:00 \
+        --partition=day \
+        --time=23:00:00 \
         --cpus-per-task=4 \
         --mem=16G \
         --output="$RUN_DIR/logs/prepare_%j.out" \
