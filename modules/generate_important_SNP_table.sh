@@ -61,6 +61,13 @@ ALS_GENES = {x.upper() for x in [
     'SETX', 'SIGMAR1', 'SPG11', 'SPTLC1', 'SQSTM1', 'TAF15',
     'TIA1', 'TUBA4A', 'UBQLN2', 'VAPB', 'VCP', 'WDR7',
 ]}
+
+NEUROLOGY_GENES = {x.upper() for x in [
+    'RIMS1', 'RIMS2', 'SNCA', 'SMN1', 'FMR1', 'PRKN', 'PINK1',
+    'PARK7', 'APP', 'PSEN1', 'PSEN2', 'APOE', 'LRRK2', 'PICALM',
+    'ABCA7', 'CLU', 'CR1', 'PLD3', 'TREM2', 'SORL1', 'PARK2',
+    'GCH1', 'TH', 'ATP13A2', 'VPS35', 'HTT', 'ALSIN', 'TUBB4A', 'TOR1A', 'FXN', 'SIL1',
+]}
 # Keep user labels; resolve aliases through the same GENCODE gene IDs where possible.
 RBP_FILE = Path.home() / "donglab/references/genome/Homo_sapiens/RBP2GO/RNA_binding_proteins/RNABP_list.csv"
 if not RBP_FILE.is_file():
@@ -857,8 +864,7 @@ for tissue in TISSUES:
 # ------------------------------------------------------------------
 # 4. SuSiE / COLOC
 #
-# Search recursively because the three pipelines write multiple
-# per-locus/global TSV files under each *_SuSiE_coloc directory.
+# Search recursively because the three pipelines write multiple per-locus/global TSV files under each *_SuSiE_coloc directory.
 # ------------------------------------------------------------------
 
 for tissue in TISSUES:
@@ -1175,7 +1181,11 @@ out["candidate_genes"]=[
 # GENCODE may use ATP13A2 for PARK9 and CFAP410 for C21orf2.
 ALS_GENE_MATCH_NAMES = ALS_GENES | {"ATP13A2", "CFAP410"}
 # Gene-list matches are case insensitive; retain original symbols in output.
-for label, gene_list in [("ALS_relevant_gene", ALS_GENE_MATCH_NAMES), ("RNA_binding_protein", RBP_GENES)]:
+# Include known alternate labels for the same neurology-panel genes.
+NEUROLOGY_GENE_MATCH_NAMES = NEUROLOGY_GENES | {"PARK9"}
+for label, gene_list in [("ALS_relevant_gene", ALS_GENE_MATCH_NAMES),
+                         ("NEUROLOGY_relevant_gene", NEUROLOGY_GENE_MATCH_NAMES),
+                         ("RNA_binding_protein", RBP_GENES)]:
     matches = [
         sorted(s for s in significant_qtl_gene_symbols.get(snp, set())
                if s.upper() in gene_list)
@@ -1274,7 +1284,7 @@ for t in TISSUES:
                     locations[r["snpid"]] = k
         jobs.append((t, q, pairs, matrix_path, scale, genotype_path, locations))
 
-# Read the PLINK header once; reject ambiguous coordinates, as in ranking script.
+# Read the PLINK header once; reject ambiguous coordinates
 alleles = defaultdict(set)
 raw = ROOT/"QTL/plink/joint_all_chrs_matrixEQTL.raw"
 targets = {k for job in jobs for k in job[-1].values()}
@@ -1394,6 +1404,7 @@ for key, values in screen_sets.items():
 score_cols=[
     "GWAS_sig",
     "ALS_relevant_gene",
+    "NEUROLOGY_relevant_gene",
     "RNA_binding_protein",
     "large_genotype_difference",
     "SCREEN_regulatory_overlap",
