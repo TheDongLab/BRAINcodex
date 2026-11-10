@@ -8,7 +8,7 @@
 #SBATCH --error=/home/zw529/donglab/data/target_ALS/QTL/SCREEN_sQTL_PSI_ranking/run_%j.err
 # Self-contained SCREEN overlap ranking and genotype/PSI plotting.
 # Submit: sbatch ~/donglab/pipelines/scripts/QTL/run_SCREEN_sqtl.sh
-# Results remain in ~/donglab/data/target_ALS/QTL/SCREEN_sQTL_PSI_ranking/.
+# Results in ~/donglab/data/target_ALS/QTL/SCREEN_sQTL_PSI_ranking/
 set -euo pipefail
 TASK_PYTHON=/home/zw529/donglab/pipelines/modules/miniconda3/bin/python
 mkdir -p /home/zw529/donglab/data/target_ALS/QTL/SCREEN_sQTL_PSI_ranking
@@ -204,10 +204,10 @@ def main():
             ascending=[False, True, True, True],
         ).reset_index(drop=True)
         ranked.insert(0, "rank", np.arange(1, len(ranked) + 1))
-        top = ranked.loc[ranked.groupby("junction_id", sort=False).cumcount() < 2].head(10).copy()
+        top = ranked.loc[ranked.groupby("junction_id", sort=False).cumcount() < 2].head(100).copy()
         top.insert(0, "top_rank", np.arange(1, len(top) + 1))
         ranked.to_csv(out / f"{tissue}.ranked_qualifying.tsv", sep="\t", index=False, na_rep="NA")
-        top.to_csv(out / f"{tissue}.top10.tsv", sep="\t", index=False, na_rep="NA")
+        top.to_csv(out / f"{tissue}.top100.tsv", sep="\t", index=False, na_rep="NA")
         pd.DataFrame(excluded, columns=columns + ["reason"]).to_csv(
             out / f"{tissue}.excluded.tsv", sep="\t", index=False, na_rep="NA")
         print(f"\n{tissue}: {len(s):,} SCREEN-overlapping pairs; {len(ranked):,} qualifying; {len(top)} selected")
@@ -221,7 +221,7 @@ def main():
                 if np.isfinite(value) and np.isfinite(dosage):
                     plot_rows.append(dict(top_rank=r['top_rank'], junction_id=r['junction_id'], snpid=r['snpid'],
                                           subject=sample, PSI_pct=100*value, ALT_dosage=int(dosage)))
-        pd.DataFrame(plot_rows, columns=['top_rank','junction_id','snpid','subject','PSI_pct','ALT_dosage']).to_csv(out/f'{tissue}.top10_subjects.tsv', sep='\t', index=False)
+        pd.DataFrame(plot_rows, columns=['top_rank','junction_id','snpid','subject','PSI_pct','ALT_dosage']).to_csv(out/f'{tissue}.top100_subjects.tsv', sep='\t', index=False)
         all_top.append(top)
         audit.append(dict(tissue=tissue, significant_pairs=overlap_counts[tissue][0], SCREEN_overlapping_pairs=len(s), no_SCREEN_overlap_pairs=overlap_counts[tissue][0]-len(s)-sum(r["tissue"]==tissue for r in missing_locations), missing_location_pairs=sum(r["tissue"]==tissue for r in missing_locations),
                           qualifying_pairs=len(ranked), selected_pairs=len(top),
@@ -229,7 +229,7 @@ def main():
         if len(s):
             del psi, gts
     pd.concat(all_top, ignore_index=True).to_csv(
-        out / "top10_per_tissue.tsv", sep="\t", index=False, na_rep="NA")
+        out / "top100_per_tissue.tsv", sep="\t", index=False, na_rep="NA")
     pd.DataFrame(audit).to_csv(out / "audit.tsv", sep="\t", index=False)
     print(f"\nSaved results to {out}", flush=True)
 
@@ -256,10 +256,10 @@ def main():
     a = ap.parse_args()
     dest = a.outdir / 'plots'
     dest.mkdir(exist_ok=True)
-    for path in sorted(a.outdir.glob('*.top10.tsv')):
-        tissue = path.name.removesuffix('.top10.tsv')
+    for path in sorted(a.outdir.glob('*.top100.tsv')):
+        tissue = path.name.removesuffix('.top100.tsv')
         top = pd.read_csv(path, sep='\t')
-        subjects = pd.read_csv(a.outdir / f'{tissue}.top10_subjects.tsv', sep='\t')
+        subjects = pd.read_csv(a.outdir / f'{tissue}.top100_subjects.tsv', sep='\t')
         if top.empty:
             continue
         nrows = (len(top)+1)//2
@@ -283,7 +283,7 @@ def main():
         fig.suptitle(f'{tissue}: SCREEN-overlapping sQTLs\nObserved PSI; black lines show means. No brain-specific SCREEN filtering.', fontsize=12)
         fig.tight_layout(rect=(0,0,1,.96))
         for ext in ('png','pdf'):
-            fig.savefig(dest/f'{tissue}.top10.{ext}',dpi=180,bbox_inches='tight')
+            fig.savefig(dest/f'{tissue}.top100.{ext}',dpi=180,bbox_inches='tight')
         plt.close(fig)
         print(f'Plotted {tissue}: {len(top)} pairs', flush=True)
 
