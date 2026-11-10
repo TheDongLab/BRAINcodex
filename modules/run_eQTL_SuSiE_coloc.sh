@@ -2,7 +2,8 @@
 #SBATCH --job-name=eQTL_SuSiE_coloc
 #SBATCH --output=/home/zw529/donglab/data/answer_ALS/MR/eQTL_SuSiE_coloc.out
 #SBATCH --error=/home/zw529/donglab/data/answer_ALS/MR/eQTL_SuSiE_coloc.err
-#SBATCH --time=08:00:00
+#SBATCH --partition=week
+#SBATCH --time=6-23:45:00
 #SBATCH --mem=80G
 #SBATCH --cpus-per-task=4
 
