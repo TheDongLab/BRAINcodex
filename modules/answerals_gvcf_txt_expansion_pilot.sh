@@ -87,28 +87,33 @@ submit_jobs() {
     echo "Five selected donors:"
     cat "$manifest"
 
-    local array_response array_id merge_response merge_id
-    array_response=$(sbatch --parsable \\
-        --time=23:55:00 \
-        --cpus-per-task=1 \
-        --mem=12G \
-        --array=0-4%5 \
-        --job-name=ALS_chr22_expand \
-        --output="$run_dir/logs/expand_%A_%a.out" \
-        --error="$run_dir/logs/expand_%A_%a.err" \
-        "$script" worker "$run_dir")
-    array_id="${array_response%%;*}"
+local array_args merge_args
 
-    merge_response=$(sbatch --parsable \\
-        --time=23:55:00 \
-        --cpus-per-task=2 \
-        --mem=24G \
-        --dependency="afterok:${array_id}" \
-        --job-name=ALS_chr22_merge5 \
-        --output="$run_dir/logs/merge_%j.out" \
-        --error="$run_dir/logs/merge_%j.err" \
-        "$script" merge "$run_dir")
-    merge_id="${merge_response%%;*}"
+array_args=(
+    --parsable
+    --time=23:55:00
+    --cpus-per-task=1
+    --mem=12G
+    --array=0-4%5
+    --job-name=ALS_chr22_expand
+    --output="$run_dir/logs/expand_%A_%a.out"
+    --error="$run_dir/logs/expand_%A_%a.err"
+)
+array_response=$(sbatch "${array_args[@]}" "$script" worker "$run_dir")
+array_id="${array_response%%;*}"
+
+merge_args=(
+    --parsable
+    --time=23:55:00
+    --cpus-per-task=2
+    --mem=24G
+    --dependency="afterok:${array_id}"
+    --job-name=ALS_chr22_merge5
+    --output="$run_dir/logs/merge_%j.out"
+    --error="$run_dir/logs/merge_%j.err"
+)
+merge_response=$(sbatch "${merge_args[@]}" "$script" merge "$run_dir")
+merge_id="${merge_response%%;*}"
 
     echo
     echo "Submitted five-task array: $array_id"
