@@ -1,6 +1,5 @@
 #!/bin/bash
 # BOXPLOT_VERSION: EXACT_COPY_OF_ORIGINAL_BASE_R_PARAMETERS__MATCHED_TRACK_SUBJECTS_ONLY
-# CIRC_PERCENT_VERSION: GENOTYPE_MEAN_FRACTION_TIMES_100
 # GENCODE_TRACK_VERSION: ALL_TRANSCRIPTS_TRANSCRIPT_RESOLVED
 #SBATCH --job-name=run_coloc_plot
 #SBATCH --output=/home/zw529/donglab/data/target_ALS/QTL/run_coloc_plot.out
@@ -10,6 +9,7 @@
 #SBATCH --mem=50G
 
 TYPE="${1:-}"
+[[ "$TYPE" == "circ eQTL" ]] && TYPE="circ_eQTL"
 ROOT="/home/zw529/donglab/data/target_ALS"; MR_DIR="${ROOT}/MR"
 METADATA="${ROOT}/targetALS_rnaseq_metadata.csv"
 GTF="/home/zw529/donglab/references/genome/Homo_sapiens/UCSC/hg38/Annotation/gencode/gencode.v49.annotation.gtf"
@@ -18,7 +18,7 @@ FLANK_FRAC=0.20; FLANK_MIN=2000; FLANK_MAX=20000; BIGWIG_BIN_BP=25; MAX_TRACK_PO
 CIRC_COORD_TOL=3; MIN_MEAN_JUNCTION_RPM=0.01; MAX_JUNCTIONS=30; MAX_HITS=0; TISSUE_FILTER=""; OVERWRITE=0; DPI=180
 
 set -euo pipefail
-case "$TYPE" in eQTL|sQTL|cQTL) ;; *) echo "Usage: sbatch $0 {eQTL|sQTL|cQTL}"; exit 1 ;; esac
+case "$TYPE" in eQTL|sQTL|cQTL|circ_eQTL) ;; *) echo "Usage: sbatch $0 {eQTL|sQTL|cQTL|circ_eQTL}"; exit 1 ;; esac
 COLOC="${MR_DIR}/${TYPE}_SuSiE_coloc_summary.tsv"; OUTDIR="${MR_DIR}/coloc_raw_plots/${TYPE}"; mkdir -p "$OUTDIR"
 for f in "$COLOC" "$METADATA" "$GTF" "$RAW_FILE"; do [[ -f "$f" ]] || { echo "ERROR: missing $f"; exit 1; }; done
 module load deepTools 2>/dev/null || { echo "ERROR: could not load deepTools"; exit 1; }
@@ -28,7 +28,7 @@ export TYPE ROOT METADATA COLOC OUTDIR GTF RAW_FILE FLANK_FRAC FLANK_MIN FLANK_M
 export MIN_MEAN_JUNCTION_RPM MAX_JUNCTIONS MAX_HITS TISSUE_FILTER OVERWRITE DPI
 "$PYTHON" - <<'PY'
 
-import os,re,csv,sys,math,warnings,subprocess
+import os,re,csv,sys,math,warnings,subprocess,hashlib
 from pathlib import Path
 from collections import defaultdict
 import numpy as np
@@ -135,7 +135,7 @@ def load_location_table(path,kind,TYPE):
         i=find_header(headers,["snpid","snp_id","rsid","id"]);c=find_header(headers,["chr","chrom","chromosome"]);p=find_header(headers,["pos","position","start"])
         return {str(r[i]):(str(r[c]),int(float(r[p]))) for r in rows if not any(missing(r.get(z)) for z in [i,c,p])}
     aliases={"eQTL":["geneid","gene_id","gene","id"],"sQTL":["junction_id","junctionid","splicing_id","event_id","phenotype_id","id"],"cQTL":["circ_id","circid","circrna_id","event_id","phenotype_id","id"]}
-    i=find_header(headers,aliases[TYPE]);c=find_header(headers,["chr","chrom","chromosome"]);s=find_header(headers,["start","left","begin","donor"])
+    i=find_header(headers,aliases["eQTL" if TYPE=="circ_eQTL" else TYPE]);c=find_header(headers,["chr","chrom","chromosome"]);s=find_header(headers,["start","left","begin","donor"])
     e=find_header(headers,["end","right","stop","acceptor"]);st=find_header(headers,["strand"],False);out={}
     for r in rows:
         try:out[str(r[i])]={"chr":str(r[c]),"start":int(float(r[s])),"end":int(float(r[e])),"strand":str(r[st]) if st and not missing(r.get(st)) else None}
@@ -179,7 +179,7 @@ get_p <- function(formula, data) {
   }, error=function(e) "NA")
 }
 
-ylab <- if (qtype=="eQTL") "Expression (Z-score)" else if (qtype=="sQTL") "Splicing Level (PSI)" else "circRNA Percentage (%)"
+ylab <- if (qtype=="circ_eQTL") "circRNA abundance (rank inverse-normal RPM)" else if (qtype=="eQTL") "Expression (Z-score)" else if (qtype=="sQTL") "Splicing Level (PSI)" else "circRNA Percentage (%)"
 
 pdf(out, width=12, height=5)
 par(mfrow=c(1,3), mar=c(5,4,4,2), oma=c(0,0,3,0))
@@ -327,6 +327,9 @@ def mean_junction_rpm(group,chrom,start,end,MIN_MEAN_JUNCTION_RPM,MAX_JUNCTIONS)
 
 def genotype_panel_title(group,genotype,qtype):
     title=f"{GENOTYPE_LABELS[genotype]} (N={len(group)})"
+    if qtype=="circ_eQTL":
+        values=[r["circ_rpm"] for r in group if r["circ_rpm"] is not None]
+        return title+(f" | mean BSJ RPM={np.mean(values):.4g}" if values else " | mean BSJ RPM=NA")
     if qtype!="cQTL":return title
     # Match run_cQTL_circ_difference.sh: average per-subject fractions,
     # then multiply by 100 for display; this is not a ratio of pooled reads.
@@ -481,8 +484,12 @@ print(f"PLINK RAW allele mappings: {len(raw_alleles):,}")
 
 with open(COLOC,newline="") as f:
     r=csv.DictReader(f,delimiter="\t");summary_headers=r.fieldnames or []
-    if "H4_reference_pass" not in summary_headers:sys.exit("ERROR: summary lacks H4_reference_pass")
-    hits=[x for x in r if truthy(x.get("H4_reference_pass"))]
+    if TYPE=="circ_eQTL":
+        if "max_PP_H4" not in summary_headers:sys.exit("ERROR: circ-eQTL summary lacks max_PP_H4")
+        hits=[x for x in r if as_float(x.get("max_PP_H4")) is not None and float(x["max_PP_H4"])>0.8]
+    else:
+        if "H4_reference_pass" not in summary_headers:sys.exit("ERROR: summary lacks H4_reference_pass")
+        hits=[x for x in r if truthy(x.get("H4_reference_pass"))]
 tissue_col=find_header(summary_headers,["tissue"])
 hits=[h for h in hits if canonical_tissue(h.get(tissue_col,"")) in CANONICAL_TISSUES]
 if TISSUE_FILTER:hits=[h for h in hits if tissue_equal(h.get(tissue_col,""),TISSUE_FILTER)]
@@ -490,8 +497,9 @@ if MAX_HITS>0:hits=hits[:MAX_HITS]
 if not hits:sys.exit("No passing coloc hits to plot.")
 if TYPE=="eQTL":event_col=find_header(summary_headers,["geneid","gene_id","gene"]);symbol_col=find_header(summary_headers,["gene_symbol","symbol"],False)
 elif TYPE=="sQTL":event_col=find_header(summary_headers,["junction_id","junctionid","splicing_id","splice_id","event_id","phenotype_id"]);symbol_col=find_header(summary_headers,["gene_symbol","symbol","gene"],False)
+elif TYPE=="circ_eQTL":event_col=find_header(summary_headers,["circ_id"]);symbol_col=find_header(summary_headers,["host_gene","gene_symbol","symbol"],False)
 else:event_col=find_header(summary_headers,["circ_id","circid","circrna_id","event_id","phenotype_id"]);symbol_col=find_header(summary_headers,["gene_symbol","symbol","gene"],False)
-print("="*60);print(f"QTL TYPE        : {TYPE}");print(f"H4 PASSING HITS : {len(hits)}");print("FILTER          : H4_reference_pass == TRUE");print("="*60)
+print("="*60);print(f"QTL TYPE        : {TYPE}");print(f"H4 PASSING HITS : {len(hits)}");print("FILTER          : "+("max_PP_H4 > 0.8" if TYPE=="circ_eQTL" else "H4_reference_pass == TRUE"));print("="*60)
 
 with open(METADATA,newline="") as f:r=csv.DictReader(f);meta_headers,metadata=r.fieldnames or [],list(r)
 subject_col=find_header(meta_headers,["externalsubjectid","subject_id","subjectid"]);sample_col=find_header(meta_headers,["externalsampleid","sample_id","sampleid"])
@@ -513,7 +521,7 @@ def possible_snps(hit):
     c=[]
     for col in ["best_candidate_SNP","best_candidate_snp"]:
         if col in hit and not missing(hit[col]):c.append(hit[col])
-    for col in {"eQTL":["top_eQTL_SNP","top_QTL_SNP"],"sQTL":["top_sQTL_SNP","top_QTL_SNP"],"cQTL":["top_cQTL_SNP","top_QTL_SNP"]}[TYPE]:
+    for col in {"circ_eQTL":["top_eQTL_SNP","top_QTL_SNP"],"eQTL":["top_eQTL_SNP","top_QTL_SNP"],"sQTL":["top_sQTL_SNP","top_QTL_SNP"],"cQTL":["top_cQTL_SNP","top_QTL_SNP"]}[TYPE]:
         if col in hit and not missing(hit[col]):c.append(hit[col])
     for k,v in hit.items():
         if "topsnp" in norm(k) and "gwas" not in norm(k) and not missing(v):c.append(v)
@@ -530,15 +538,31 @@ total_plotted=total_skipped=total_boxplots=0
 for tissue,tissue_hits in hits_by_tissue.items():
     print(f"\n{'='*60}\nTISSUE: {tissue}\nPASSING HITS: {len(tissue_hits)}\n{'='*60}")
     qtl=ROOT/tissue/TYPE
-    if TYPE=="eQTL":pheno_file,loc_file=qtl/f"expression_{tissue}.txt",qtl/"gene_location.txt"
+    if TYPE in {"eQTL","circ_eQTL"}:pheno_file,loc_file=qtl/f"expression_{tissue}.txt",qtl/"gene_location.txt"
     elif TYPE=="sQTL":pheno_file,loc_file=qtl/f"splicing_{tissue}.txt",qtl/"splicing_location.txt"
     else:pheno_file,loc_file=qtl/f"circ_{tissue}.txt",qtl/"circ_location.txt"
     snp_file,snp_loc_file=qtl/f"snp_{tissue}.txt",qtl/"snp_location.txt";cov_file=qtl/f"covariates_{tissue}_encoded.txt"
-    miss=[p for p in [pheno_file,loc_file,snp_file,snp_loc_file] if not p.exists()]
+    required=[pheno_file,loc_file,snp_file,snp_loc_file]
+    if TYPE=="circ_eQTL":
+        rpm_file=qtl/f"circ_rpm_{tissue}.txt";selected_file=qtl/"selected_samples.tsv"
+        required += [rpm_file,selected_file]
+    miss=[p for p in required if not p.exists()]
     if miss:print("SKIP TISSUE: missing "+", ".join(map(str,miss)));total_skipped+=len(tissue_hits);continue
     processed_roots_for_tissue(ROOT,tissue);status=load_covariate_status(cov_file)
     events={h[event_col].strip() for h in tissue_hits if not missing(h.get(event_col))};snps={s for h in tissue_hits for s in possible_snps(h)}
     pheno_rows=extract_matrix_rows(pheno_file,events);geno_rows=extract_matrix_rows(snp_file,snps)
+    if TYPE=="circ_eQTL":
+        rpm_rows=extract_matrix_rows(rpm_file,events)
+        with open(selected_file,newline="") as f:
+            selected_reader=csv.DictReader(f,delimiter="\t")
+            if not {"donor_id","sample_id"}.issubset(selected_reader.fieldnames or []):
+                sys.exit(f"ERROR: {selected_file} requires donor_id and sample_id")
+            selected={}
+            for row in selected_reader:
+                donor,sample=row["donor_id"].strip(),row["sample_id"].strip()
+                if donor in selected and norm(selected[donor])!=norm(sample):
+                    sys.exit(f"ERROR: multiple selected samples for {donor} in {selected_file}")
+                selected[donor]=sample
     trait_locs=load_location_table(loc_file,"trait",TYPE);snp_locs=load_location_table(snp_loc_file,"snp",TYPE)
 
     for i,hit in enumerate(tissue_hits,1):
@@ -546,13 +570,19 @@ for tissue,tissue_hits in hits_by_tissue.items():
         print(f"\n[{i}/{len(tissue_hits)}] {tissue} | {event} | {symbol}")
         phenotype=find_matrix_row(pheno_rows,event)
         if phenotype is None:print("  SKIP: phenotype missing");total_skipped+=1;continue
+        raw_rpm=None
+        if TYPE=="circ_eQTL":
+            raw_rpm=rpm_rows.get(event)
+            if raw_rpm is None:print("  SKIP: exact circ ID absent from raw RPM matrix");total_skipped+=1;continue
+            bad=[qid for qid in phenotype if qid not in selected or not selected[qid] or as_float(raw_rpm.get(qid)) is None or float(raw_rpm[qid])<0]
+            if bad:print(f"  SKIP: missing selected sample or invalid raw RPM for {len(bad)} phenotype donors");total_skipped+=1;continue
         snp=genotype=None
         for candidate in possible_snps(hit):
             if candidate in geno_rows:snp,genotype=candidate,geno_rows[candidate];break
         if genotype is None or snp not in snp_locs:print("  SKIP: genotype/SNP location missing");total_skipped+=1;continue
         snp_chr,snp_pos=snp_locs[snp];allele=raw_alleles.get((chr_key(snp_chr),int(snp_pos)))
         if allele is None or allele["counted"] not in {allele["ref"],allele["alt"]}:print("  SKIP: allele orientation unavailable");total_skipped+=1;continue
-        flip=allele["counted"]==allele["ref"];loc=find_location(trait_locs,event)
+        flip=allele["counted"]==allele["ref"];loc=parse_event_coordinates(event) if TYPE=="circ_eQTL" else find_location(trait_locs,event)
         if loc is None:print("  SKIP: coordinates unavailable");total_skipped+=1;continue
         print(f"  SNP alleles: REF={allele['ref']} ALT={allele['alt']} PLINK_counted={allele['counted']} | {'flipping to ALT dosage' if flip else 'already ALT dosage'}")
         chrom=loc["chr"];tstart,tend=sorted([loc["start"],loc["end"]]);strand=loc.get("strand")
@@ -562,6 +592,9 @@ for tissue,tissue_hits in hits_by_tissue.items():
         n_transcripts=len({e["transcript_id"] for e in exons if e["transcript_id"]})
         print(f"  GENCODE transcripts in plotted region: {n_transcripts}")
         label=symbol if symbol else event;base=safe_name(f"{tissue}__{TYPE}__{label}__{snp}")
+        if TYPE=="circ_eQTL":
+            # Full BSJ identity (including strand) prevents same-host filename collisions.
+            base=safe_name(f"{tissue}__{TYPE}__{event}__{snp}")[:150]+"__"+hashlib.sha256(f"{tissue}|{event}|{snp}".encode()).hexdigest()[:16]
         boxout=OUTDIR/f"{base}.boxplot.pdf";pdf=OUTDIR/f"{base}.density.pdf";png=OUTDIR/f"{base}.density.png";svg=OUTDIR/f"{base}.density.svg";tsv=OUTDIR/f"{base}.subjects.tsv"
 
         records=[]
@@ -570,9 +603,14 @@ for tissue,tissue_hits in hits_by_tissue.items():
             try:ph=float(phenotype[qid])
             except:continue
             if g is None or not np.isfinite(ph):continue
-            meta=metadata_for_qtl_id(qid,tissue)
-            if not meta:continue
-            sid=str(meta.get(sample_col,"")).strip();subj=str(meta.get(subject_col,"")).strip();sd=resolve_sample_dir(ROOT,tissue,sid) if sid else None
+            if TYPE=="circ_eQTL":
+                # Use precisely the RNA sample selected during phenotype preparation.
+                sid=selected[qid];subj=qid
+            else:
+                meta=metadata_for_qtl_id(qid,tissue)
+                if not meta:continue
+                sid=str(meta.get(sample_col,"")).strip();subj=str(meta.get(subject_col,"")).strip()
+            sd=resolve_sample_dir(ROOT,tissue,sid) if sid else None
             if sd is None:
                 print(f"    SAMPLE DIR MISSING: {qid} | {sid} | tissue={tissue}")
                 continue
@@ -581,6 +619,10 @@ for tissue,tissue_hits in hits_by_tissue.items():
                             "circ_percent_file":None,"circ_quant_source":None,"circ_match_type":None,"circ_matched_start":None,"circ_matched_end":None})
         print(f"  Candidate subjects before track QC: {len(records)}")
         for r in records:
+            if TYPE=="circ_eQTL":
+                r["circ_rpm"]=float(raw_rpm[r["qtl_id"]])
+                r["circ_quant_source"]=str(rpm_file);r["circ_match_type"]="exact_matrix_ID"
+                r["circ_matched_start"],r["circ_matched_end"]=tstart,tend
             if TYPE in {"sQTL","cQTL"}:r["primary_reads"]=primary_read_count(r["sample_dir"])
             r["plus_track"],r["minus_track"],r["plus_source"],r["minus_source"]=bigwig_strands(r["sample_dir"],chrom,pstart,pend,nb)
             if TYPE=="cQTL":
@@ -599,6 +641,9 @@ for tissue,tissue_hits in hits_by_tissue.items():
         if TYPE in {"sQTL","cQTL"}:
             for g in groups:junctions[g],_=mean_junction_rpm(groups[g],chrom,pstart,pend,MIN_MEAN_JUNCTION_RPM,MAX_JUNCTIONS)
         circ={g:0. for g in groups}
+        if TYPE=="circ_eQTL":
+            for g in groups:
+                if groups[g]:circ[g]=float(np.mean([r["circ_rpm"] for r in groups[g]]))
         if TYPE=="cQTL":
             for g in groups:
                 valid=[r for r in groups[g] if r["primary_reads"]]
@@ -606,11 +651,11 @@ for tissue,tissue_hits in hits_by_tissue.items():
 
         with open(tsv,"w",newline="") as f:
             w=csv.writer(f,delimiter="\t");w.writerow(["tissue","qtl_type","event","gene_symbol","snp","ref","alt","plink_counted_allele","qtl_id","subject_id","metadata_sample_id","filesystem_sample_id","genotype_group","genotype_label","genotype_raw","phenotype","is_als","primary_reads","plus_track_source","minus_track_source","circ_reads","circ_rpm","linear_reads","circ_percent_file","circ_match_type","circ_matched_start","circ_matched_end","circ_quant_source"])
-            for r in complete:w.writerow([tissue,TYPE,event,symbol,snp,allele["ref"],allele["alt"],allele["counted"],r["qtl_id"],r["subject_id"],r["sample_id"],r["sample_fs_id"],r["genotype"],GENOTYPE_LABELS[r["genotype"]],r["genotype_raw"],r["phenotype"],r["is_als"],r["primary_reads"] or "",r["plus_source"],r["minus_source"],r["circ_reads"] or "",r["circ_rpm"] or "",r["linear_reads"] or "","" if r["circ_percent_file"] is None else r["circ_percent_file"],r["circ_match_type"] or "",r["circ_matched_start"] or "",r["circ_matched_end"] or "",r["circ_quant_source"] or ""])
+            for r in complete:w.writerow([tissue,TYPE,event,symbol,snp,allele["ref"],allele["alt"],allele["counted"],r["qtl_id"],r["subject_id"],r["sample_id"],r["sample_fs_id"],r["genotype"],GENOTYPE_LABELS[r["genotype"]],r["genotype_raw"],r["phenotype"],r["is_als"],r["primary_reads"] or "",r["plus_source"],r["minus_source"],r["circ_reads"] or "","" if r["circ_rpm"] is None else r["circ_rpm"],r["linear_reads"] or "","" if r["circ_percent_file"] is None else r["circ_percent_file"],r["circ_match_type"] or "",r["circ_matched_start"] or "",r["circ_matched_end"] or "",r["circ_quant_source"] or ""])
 
         if TYPE!="cQTL" and not OVERWRITE and pdf.exists() and png.exists() and svg.exists():print("  DENSITY EXISTS; boxplot/TSV refreshed, density skipped");continue
         cmax=max(max(float(np.max(plus[g])),float(np.max(minus[g]))) for g in groups if groups[g]);cmax=1 if cmax<=0 else cmax*1.05
-        linear=TYPE in {"sQTL","cQTL"} and any(junctions.get(g) for g in groups);circular=TYPE=="cQTL" and any(circ[g]>0 for g in groups)
+        linear=TYPE in {"sQTL","cQTL"} and any(junctions.get(g) for g in groups);circular=TYPE in {"cQTL","circ_eQTL"} and any(circ[g]>0 for g in groups)
         extent=cmax*(2.05 if circular else 1.80 if linear else 1.08);width=binbp*.92
         ref_ratio=max(.72,min(4.0,.18*max(1,n_transcripts)))
         fig_height=max(10,9+.22*n_transcripts)
@@ -620,7 +665,7 @@ for tissue,tissue_hits in hits_by_tissue.items():
             if groups[g]:
                 ax.bar(x,plus[g],width=width,color=TRACK_COLORS[g],alpha=.82,linewidth=0);ax.bar(x,-minus[g],width=width,color=TRACK_COLORS[g],alpha=.55,linewidth=0)
                 if TYPE in {"sQTL","cQTL"}:draw_linear_arcs(ax,junctions[g],x,plus[g],minus[g],cmax,TRACK_COLORS[g])
-                if TYPE=="cQTL":draw_circ_arc(ax,tstart,tend,circ[g],cmax,TRACK_COLORS[g],strand)
+                if TYPE in {"cQTL","circ_eQTL"}:draw_circ_arc(ax,tstart,tend,circ[g],cmax,TRACK_COLORS[g],strand)
             else:ax.text(.5,.5,"No subjects",transform=ax.transAxes,ha="center",va="center",fontsize=12)
             ax.axhline(0,color="#555555",lw=.8);ax.axvspan(tstart,tend,alpha=.10,color="#999999")
             if pstart<=snp_pos<=pend:ax.axvline(snp_pos,ls="--",lw=1.3,color="black",alpha=.8)
@@ -640,6 +685,7 @@ for tissue,tissue_hits in hits_by_tissue.items():
         footer=(f"Trait: {chrom}:{tstart:,}-{tend:,} | flank: {flank:,} bp each side | shaded region = trait locus | dashed vertical line = {snp} | coverage bin width ≈ {round(binbp)} bp\n"
                 "Coverage uses the same RPM normalization as the source BigWigs (1e6 / primary alignments); + strand above 0, - strand below 0")
         if TYPE=="cQTL":footer+="\nPanel mean circ = 100 × mean per-subject circ_percent; missing/invalid quantification excluded (quant N shown when different).\nLinear splice junctions = solid arcs | circular/back-splice junction = dashed arc | labels = mean junction RPM per subject"
+        elif TYPE=="circ_eQTL":footer+="\nDashed arc and panel label = mean BSJ RPM from the prepared circ_rpm matrix, including zeros; selected RNA samples only.\nBoxplots use the rank inverse-normal phenotype; coverage retains source BigWig normalization. Linear junction arcs are not shown."
         elif TYPE=="sQTL":footer+="\nArc labels = mean LeafCutter junction RPM per subject"
         fig.text(.5,.004,footer,ha="center",va="bottom",fontsize=9.5)
         fig.savefig(pdf,bbox_inches="tight");fig.savefig(png,dpi=DPI,bbox_inches="tight");fig.savefig(svg,bbox_inches="tight");plt.close(fig)
