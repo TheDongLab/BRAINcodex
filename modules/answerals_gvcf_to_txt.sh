@@ -131,7 +131,7 @@ submit_jobs() {
 
     echo "Run directory: $run_dir"
     echo "Chromosomes: ${CHROMOSOMES[*]}"
-    echo "Expansion array: ${EXPECTED_DONORS} tasks, at most 95 running concurrently."
+    echo "Expansion array: ${EXPECTED_DONORS}"
 
     array_response=$(
         sbatch --parsable \
@@ -153,7 +153,7 @@ submit_jobs() {
             --cpus-per-task=4 \
             --mem=48G \
             --dependency="afterok:${array_id}" \
-            --array="1-$((N_CHROMOSOMES))%4" \
+            --array="1-$((N_CHROMOSOMES))%20" \
             --job-name=answerALS_merge_chr \
             --output="$run_dir/logs/merge_%A_%a.out" \
             --error="$run_dir/logs/merge_%A_%a.err" \
@@ -164,7 +164,7 @@ submit_jobs() {
     final_response=$(
         sbatch --parsable \
             --partition=week \
-            --time=5-00:00:00 \
+            --time=6-00:00:00 \
             --cpus-per-task=4 \
             --mem=24G \
             --dependency="afterok:${merge_id}" \
