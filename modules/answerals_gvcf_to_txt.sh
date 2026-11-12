@@ -6,8 +6,10 @@
 set -euo pipefail
 export LC_ALL=C
 
-ROOT="/home/zw529/donglab/data/answer_ALS/Blood/WGS/Processed"
-QTL="/home/zw529/donglab/data/answer_ALS/QTL"
+BASE="/home/zw529/donglab/data/answer_ALS"
+RNA_ROOT="${BASE}/iPSC_Motor_Neuron/RNAseq/Processed"
+WGS_ROOT="${BASE}/Blood/WGS/Processed"
+QTL="${BASE}/QTL"
 REFERENCE="/home/zw529/donglab/references/genome/Homo_sapiens/UCSC/hg38/Sequence/WholeGenomeFasta/genome.fa"
 OUTPUT_ROOT="${QTL}/chromosome_joint_vcfs/gvcf_to_txt"
 
@@ -34,11 +36,16 @@ submit_jobs() {
         echo "[ERROR] Missing reference index: ${REFERENCE}.fai" >&2
         exit 1
     }
+    [[ -d "$RNA_ROOT" ]] || {
+        echo "[ERROR] Missing RNA-seq donor directory: $RNA_ROOT" >&2
+        exit 1
+    }
 
     local script run_id run_dir manifest chrom_file sample_map
     local array_response array_id merge_response merge_id final_response final_id
-    local donor_dir donor input sample output task
-    local -a donor_dirs files source_samples
+    local rna_dir donor donor_wgs_dir input sample task
+    local n_rna_dirs=0 n_missing_gvcf=0
+    local -a rna_dirs files source_samples
 
     script="$(readlink -f "$0")"
     run_id="$(date +%Y%m%d_%H%M%S)_$$"
@@ -53,29 +60,35 @@ submit_jobs() {
     printf 'task\tdonor\tgvcf_sample_id\tinput_gvcf\n' > "$manifest"
     : > "$sample_map"
 
-    mapfile -t donor_dirs < <(
-        find "$ROOT" -mindepth 2 -maxdepth 2 -type f \
-            -name '*.haplotypeCalls.er.raw.vcf.gz' -printf '%h\n' |
-        sort -u
+    mapfile -t rna_dirs < <(
+        find "$RNA_ROOT" -mindepth 1 -maxdepth 1 -type d | sort
     )
-
-    if [[ "${#donor_dirs[@]}" -ne "$EXPECTED_DONORS" ]]; then
-        echo "[ERROR] Found ${#donor_dirs[@]} donors with raw gVCFs; expected ${EXPECTED_DONORS}." >&2
-        exit 1
-    fi
 
     declare -A seen_samples=()
     task=0
 
-    for donor_dir in "${donor_dirs[@]}"; do
-        donor="$(basename "$donor_dir")"
+    for rna_dir in "${rna_dirs[@]}"; do
+        [[ -d "$rna_dir" ]] || continue
+        n_rna_dirs=$((n_rna_dirs + 1))
+        donor="$(basename "$rna_dir")"
+        donor_wgs_dir="$WGS_ROOT/$donor"
+
+        if [[ ! -d "$donor_wgs_dir" ]]; then
+            echo "[INFO] $donor: no matching WGS folder; skipping."
+            n_missing_gvcf=$((n_missing_gvcf + 1))
+            continue
+        fi
 
         shopt -s nullglob
-        files=( "$donor_dir"/*.haplotypeCalls.er.raw.vcf.gz )
+        files=( "$donor_wgs_dir"/*.haplotypeCalls.er.raw.vcf.gz )
         shopt -u nullglob
 
-        if [[ "${#files[@]}" -ne 1 ]]; then
-            echo "[ERROR] Expected exactly one raw gVCF for $donor; found ${#files[@]}." >&2
+        if ((${#files[@]} == 0)); then
+            echo "[INFO] $donor: no raw gVCF in its WGS folder; skipping."
+            n_missing_gvcf=$((n_missing_gvcf + 1))
+            continue
+        elif ((${#files[@]} != 1)); then
+            echo "[ERROR] $donor: expected one raw gVCF; found ${#files[@]}." >&2
             exit 1
         fi
 
@@ -90,10 +103,10 @@ submit_jobs() {
         sample="${source_samples[0]}"
 
         if [[ -n "${seen_samples[$sample]+x}" ]]; then
-            echo "[ERROR] Duplicate source sample ID: $sample" >&2
+            echo "[ERROR] Duplicate source sample ID '$sample' for $donor and ${seen_samples[$sample]}." >&2
             exit 1
         fi
-        seen_samples["$sample"]=1
+        seen_samples["$sample"]="$donor"
 
         printf '%s\t%s\t%s\t%s\n' \
             "$task" "$donor" "$sample" "$input" >> "$manifest"
@@ -106,8 +119,17 @@ submit_jobs() {
         task=$((task + 1))
     done
 
+    echo "RNA-seq donor folders examined: $n_rna_dirs"
+    echo "RNA-seq donors without a matching raw gVCF: $n_missing_gvcf"
+    echo "RNA/WGS donors selected: $task"
+
+    if [[ "$task" -ne "$EXPECTED_DONORS" ]]; then
+        echo "[ERROR] Expected $EXPECTED_DONORS donors with both RNA-seq and raw WGS gVCF; found $task." >&2
+        echo "[ERROR] Refusing to submit an incomplete or differently sized cohort." >&2
+        exit 1
+    fi
+
     echo "Run directory: $run_dir"
-    echo "Eligible donors: $task"
     echo "Chromosomes: ${CHROMOSOMES[*]}"
     echo "Expansion array: ${EXPECTED_DONORS} tasks, at most 95 running concurrently."
 
@@ -154,7 +176,7 @@ submit_jobs() {
     final_id="${final_response%%;*}"
 
     echo
-    echo "Submitted expansion array: $array_id (815 donors, %95)"
+    echo "Submitted expansion array: $array_id (815 RNA/WGS donors, %95)"
     echo "Submitted chromosome-merge array: $merge_id (25 chromosomes, %4; after expansion)"
     echo "Submitted final concat/index job: $final_id (after chromosome merges)"
     echo "Outputs will be under: $run_dir"
