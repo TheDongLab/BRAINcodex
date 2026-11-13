@@ -864,7 +864,7 @@ for tissue in TISSUES:
 # ------------------------------------------------------------------
 # 4. SuSiE / COLOC
 #
-# Search recursively because the three pipelines write multiple per-locus/global TSV files under each *_SuSiE_coloc directory.
+# Search recursively; the three pipelines write multiple per-locus/global TSV files under each *_SuSiE_coloc directory.
 # ------------------------------------------------------------------
 
 for tissue in TISSUES:
@@ -1177,11 +1177,11 @@ out["candidate_genes"]=[
     for snp in out.index
 ]
 
-# Include current symbols for user-provided alternate gene labels.
+# Include current symbols for user-provided alt gene labels.
 # GENCODE may use ATP13A2 for PARK9 and CFAP410 for C21orf2.
 ALS_GENE_MATCH_NAMES = ALS_GENES | {"ATP13A2", "CFAP410"}
 # Gene-list matches are case insensitive; retain original symbols in output.
-# Include known alternate labels for the same neurology-panel genes.
+# Include known alt labels for the same neurology-panel genes.
 NEUROLOGY_GENE_MATCH_NAMES = NEUROLOGY_GENES | {"PARK9"}
 for label, gene_list in [("ALS_relevant_gene", ALS_GENE_MATCH_NAMES),
                          ("NEUROLOGY_relevant_gene", NEUROLOGY_GENE_MATCH_NAMES),
@@ -1194,7 +1194,7 @@ for label, gene_list in [("ALS_relevant_gene", ALS_GENE_MATCH_NAMES),
     out[f"{label}_matches"] = [";".join(v) for v in matches]
     out[label] = [bool(v) for v in matches]
 
-# Observed homozygote differences, using the supplied ranking-script rules.
+# Observed homozygote differences using the supplied ranking-script rules.
 # Optional TSV named by QTL_MATRIX_CONFIG: tissue, qtl_type, matrix_path, scale.
 # scale must be zscore (eQTL), fraction or percent (sQTL/cQTL).
 # Paths may contain {tissue} and {root}. sQTL has a confirmed default.
@@ -1371,7 +1371,7 @@ for q in QTLS:
 print(f"Genotype difference audit: {OUTDIR/'ALS_genotype_difference_audit.tsv'}", flush=True)
 print("Genotype comparison statuses:", differences.status.value_counts().to_dict(), flush=True)
 
-# SCREEN annotation: all significant sQTL overlaps, without top-10 filtering.
+# SCREEN annotation: all significant sQTL overlaps
 screen_file = ROOT/"QTL/SCREEN_sQTL_PSI_ranking/SCREEN_overlaps.tsv"
 if not screen_file.is_file():
     raise FileNotFoundError(f"Required SCREEN overlap table missing: {screen_file}. Run the SCREEN script first.")
@@ -1686,6 +1686,51 @@ ranked=ranked.drop(
 
 ranked.insert(0, "priority_rank", np.arange(1, len(ranked)+1))
 ranked.to_csv(rankfile, sep="\t", index=False)
+
+# Exact significant QTL pairs for HIGH/MEDIUM SNPs, with SNP-wide evidence.
+def describe_snp_evidence(categories):
+    labels = {"GWAS_sig": "GWAS p<0.05", "ALS_relevant_gene": "ALS gene target",
+              "NEUROLOGY_relevant_gene": "Neurology gene target",
+              "RNA_binding_protein": "RBP target", "large_genotype_difference": "Large genotype difference",
+              "SCREEN_regulatory_overlap": "SCREEN regulatory overlap"}
+    for q in ("eQTL", "sQTL", "cQTL"):
+        for suffix, label in [("significant", "significant QTL"), ("SMR_significant", "SMR"),
+                              ("HEIDI_pass", "HEIDI pass"), ("coloc_significant", "coloc"),
+                              ("SuSiE_credible_set", "SuSiE credible set")]:
+            labels[f"{q}_{suffix}"] = f"{q} {label}"
+    if categories is None or str(categories).lower() in {"nan", "none"}:
+        return ""
+    return ", ".join(labels.get(c.strip(), c.strip()) for c in str(categories).split(";") if c.strip())
+
+priority_snps = out[out.validation_priority.isin(["HIGH", "MEDIUM"])].set_index("SNP", drop=False)
+manifest_rows = []
+for tissue in TISSUES:
+    for q in QTLS:
+        path = ROOT/tissue/q/"results"/f"{tissue}_{q}.FDR0.05.txt"
+        if not path.is_file():
+            continue
+        d = read_table(path)
+        sc = find_col(d.columns, ["snpid", "snp_id", "snp", "rsid", "variant"], required=True)
+        aliases = {"eQTL": ["geneid", "gene_id", "gene", "phenotype_id"],
+                   "sQTL": ["junction_id", "junctionid", "phenotype_id", "event_id"],
+                   "cQTL": ["circ_id", "circid", "phenotype_id", "event_id"]}
+        tc = find_col(d.columns, aliases[q], required=True)
+        fc = find_col(d.columns, ["FDR", "qvalue", "q_value", "padj"], required=True)
+        for r in d.to_dict("records"):
+            snp, trait = clean_snp(r.get(sc)), clean_value(r.get(tc))
+            fdr = pd.to_numeric(r.get(fc), errors="coerce")
+            if snp not in priority_snps.index or trait is None or not np.isfinite(fdr) or not 0 <= fdr <= 0.05:
+                continue
+            ev = priority_snps.loc[snp]
+            genes = ";".join(sorted({g["gene_symbol"] for g in genes_for_trait(trait, q) if g.get("gene_symbol")}))
+            manifest_rows.append(dict(SNP=snp, trait=trait, tissue=tissue, qtl_type=q,
+                validation_priority=ev["validation_priority"], FDR=fdr, gene_symbols=genes,
+                SNP_evidence=describe_snp_evidence(ev["evidence_categories"])))
+manifest_columns = ["SNP", "trait", "tissue", "qtl_type", "validation_priority", "FDR", "gene_symbols", "SNP_evidence"]
+pd.DataFrame(manifest_rows, columns=manifest_columns).drop_duplicates(
+    ["SNP", "trait", "tissue", "qtl_type"]).to_csv(OUTDIR/"HIGH_MEDIUM_plot_manifest.tsv", sep="\t", index=False)
+print(f"Manifest: {OUTDIR/'HIGH_MEDIUM_plot_manifest.tsv'}", flush=True)
+
 # ------------------------------------------------------------------
 # SUMMARY
 # ------------------------------------------------------------------
