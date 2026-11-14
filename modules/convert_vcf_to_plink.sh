@@ -115,7 +115,7 @@ if "$ANSWERALS_MODE"; then
         --chr chr1-22,chrX,chrY,chrM \
         --split-par hg38 \
         --set-all-var-ids @:#:\$r:\$a \
-        --new-id-max-allele-len 800 \
+        --new-id-max-allele-len 10000 \
         --vcf-half-call m \
         --import-max-alleles 255 \
         --make-pgen \
@@ -126,7 +126,7 @@ else
         --chr chr1-22,chrX,chrY,chrM \
         --split-par hg38 \
         --set-all-var-ids @:#:\$r:\$a \
-        --new-id-max-allele-len 800 \
+        --new-id-max-allele-len 10000 \
         --vcf-half-call m \
         --impute-sex max-female-xf=0.2 min-male-xf=0.8 \
         --make-pgen \
@@ -152,7 +152,7 @@ fi
 # plink2 --vcf ${VCF_IN} \
 #        --chr chr1-22 \
 #        --set-all-var-ids @:#:\$r:\$a \
-#        --new-id-max-allele-len 800 \
+#        --new-id-max-allele-len 10000 \
 #        --vcf-half-call m \
 #        --make-pgen \
 #        --out ${RAW_PREFIX} \
