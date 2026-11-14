@@ -17,6 +17,13 @@ VCF_IN=/home/zw529/donglab/data/answer_ALS/QTL/joint_genotyped_GQ.vcf.gz   ### i
 OUTDIR=/home/zw529/donglab/data/answer_ALS/QTL/plink
 mkdir -p ${OUTDIR}
 
+# AnswerALS sex comes from the participant metadata
+SEX_PSAM=${OUTDIR}/sexcheck/answerALS_sex.psam
+ANSWERALS_MODE=false
+if [[ "$VCF_IN" == *"/answer_ALS/"* ]]; then
+    ANSWERALS_MODE=true
+fi
+
 #----------------------------------------
 # OPTIONAL ANSWERALS SEX-CHECK FUNCTION
 # Uncomment this function and its call to recreate the AnswerALS metadata PSAM and chrX/chrY sex-check.
@@ -43,13 +50,6 @@ mkdir -p ${OUTDIR}
 #         --out "$W/answerALS_sexcheck"
 # }
 # answerals_sexcheck
-
-# AnswerALS sex comes from the participant metadata
-SEX_PSAM=${OUTDIR}/sexcheck/answerALS_sex.psam
-ANSWERALS_MODE=false
-if [[ "$VCF_IN" == *"/answer_ALS/"* ]]; then
-    ANSWERALS_MODE=true
-fi
 
 # Temp files for Step 0 (if ever uncommented)
 VCF_FILTERED=${OUTDIR}/joint_GQ0_temp.vcf.gz
@@ -117,6 +117,7 @@ if "$ANSWERALS_MODE"; then
         --set-all-var-ids @:#:\$r:\$a \
         --new-id-max-allele-len 800 \
         --vcf-half-call m \
+        --import-max-alleles 255 \
         --make-pgen \
         --out ${RAW_PREFIX} \
         --threads ${SLURM_CPUS_PER_TASK}
