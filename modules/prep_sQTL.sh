@@ -21,6 +21,7 @@ PLINK="$QTL_DIR/plink"
 SPLICING_RAW="$QTL_DIR/splicing_matrix.txt"
 RAW="$PLINK/joint_all_chrs_matrixEQTL.raw"
 BIM="$PLINK/joint_all_chrs_filtered_bed.bim"
+PSAM="$PLINK/joint_all_chrs_filtered.psam"
 PCA="$PLINK/joint_pca.eigenvec"
 MAP_FILE="/home/zw529/donglab/references/genome/Homo_sapiens/UCSC/hg38/Annotation/gencode/ncbi_to_ucsc.txt"
 DBSNP_VCF="/home/zw529/donglab/references/genome/Homo_sapiens/UCSC/hg38/Annotation/gencode/GCF_000001405.40.gz"
@@ -46,6 +47,9 @@ mkdir -p "$OUTDIR"
 for f in "$SPLICING_RAW" "$RAW" "$BIM" "$PCA" "$MAP_FILE" "$DBSNP_VCF" "$METADATA_CSV"; do
     [[ -s "$f" ]] || { echo "[ERROR] Missing or empty input: $f" >&2; exit 1; }
 done
+if [[ "$EXPERIMENT" == answer_ALS ]]; then
+    [[ -s "$PSAM" ]] || { echo "[ERROR] Missing or empty AnswerALS PSAM: $PSAM" >&2; exit 1; }
+fi
 
 echo "============================================"
 echo "  $EXPERIMENT sQTL Prep for $TISSUE"
@@ -84,12 +88,31 @@ EOF
 
 echo "[1] Intersecting metadata, genotypes, and splicing matrix..."
 python3 << EOF
-import pandas as pd, numpy as np, re, os, sys
+import gc
+import os
+import pandas as pd
+import numpy as np
+import re
 from collections import Counter
 
 experiment, tissue = "$EXPERIMENT", "$TISSUE"
-raw = pd.read_csv("$RAW", sep=r"\\s+", usecols=lambda c: c not in ["PAT","MAT","SEX","PHENOTYPE"])
-pca = pd.read_csv("$PCA", sep=r"\\s+").rename(columns={"#IID":"IID"})
+
+# Keep the original TargetALS raw-matrix import. AnswerALS uses the small PSAM roster and streams its very wide .raw matrix below.
+if experiment == "target_ALS":
+    raw = pd.read_csv(
+        "$RAW",
+        sep=r"\\s+",
+        usecols=lambda c: c not in ["PAT", "MAT", "SEX", "PHENOTYPE"]
+    )
+    raw_sample_ids = set(raw["IID"].astype(str))
+else:
+    psam = pd.read_csv("$PSAM", sep=r"\\s+")
+    psam.columns = [c.lstrip("#") for c in psam.columns]
+    if "IID" not in psam.columns:
+        raise SystemExit("AnswerALS PSAM has no IID column.")
+    raw_sample_ids = set(psam["IID"].astype(str))
+
+pca = pd.read_csv("$PCA", sep=r"\\s+").rename(columns={"#IID": "IID"})
 headers = pd.read_csv("$SPLICING_RAW", sep="\\t", nrows=0).columns.tolist()
 mismatch_file = "$SEX_MISMATCH_FILE"
 mismatches = set()
@@ -112,7 +135,7 @@ for line in open("$MAP_FILE"):
         ucsc_to_ncbi[ucsc.upper()] = ncbi.upper()
 
 if experiment == "target_ALS":
-    breakdown = pd.read_csv("$BREAKDOWN_TSV", sep="\\t") if tissue not in ("Cortex","Spinal_Cord") else None
+    breakdown = pd.read_csv("$BREAKDOWN_TSV", sep="\\t") if tissue not in ("Cortex", "Spinal_Cord") else None
     meta = pd.read_csv("$METADATA_CSV", low_memory=False)
     meta.columns = meta.columns.str.strip().str.lower()
     meta = meta[~meta["externalsampleid"].isin(mismatches)].copy()
@@ -127,15 +150,22 @@ if experiment == "target_ALS":
         "Cerebellum": "Cerebellum"
     }
     pattern = patterns.get(tissue, tissue)
-    if tissue in ("Cortex","Spinal_Cord"):
+    if tissue in ("Cortex", "Spinal_Cord"):
         mt = meta[meta["tissue"].astype("string").str.contains(pattern, case=False, na=False)].copy()
     else:
         approved = breakdown[breakdown["tissues"].str.contains(tissue, na=False)]["subject_id"].unique()
         mf = meta[meta["externalsubjectid"].isin(approved)].copy()
         mt = mf[mf.apply(lambda r: r.astype(str).str.contains(pattern, case=False).any(), axis=1)].copy()
+
     def rin(r):
-        try: return max(float(r.iloc[16]) if pd.notnull(r.iloc[16]) else 0, float(r.iloc[17]) if pd.notnull(r.iloc[17]) else 0)
-        except Exception: return 0
+        try:
+            return max(
+                float(r.iloc[16]) if pd.notnull(r.iloc[16]) else 0,
+                float(r.iloc[17]) if pd.notnull(r.iloc[17]) else 0
+            )
+        except Exception:
+            return 0
+
     mt["RIN_score"] = mt.apply(rin, axis=1)
     mt = mt[(mt["post_mortem_interval_in_hours"] <= 40) & (mt["RIN_score"] >= 3)]
     meta_unique = mt.sort_values("RIN_score", ascending=False).drop_duplicates("externalsubjectid").copy()
@@ -147,47 +177,62 @@ else:
     meta = pd.read_csv("$METADATA_CSV", low_memory=False, encoding="utf-8-sig")
     id_col = meta.columns[0]
     sex_col = next((c for c in meta.columns if c.strip().lower() == "sex"), None)
-    group_col = next((c for c in meta.columns if c.strip().lower() in ("subject_group","subject group")), None)
+    group_col = next(
+        (c for c in meta.columns if c.strip().lower() in ("subject_group", "subject group")),
+        None
+    )
     if sex_col is None or group_col is None:
         raise SystemExit("AnswerALS metadata must contain Sex and SUBJECT_GROUP columns.")
-    meta = meta.rename(columns={id_col:"donor_id", sex_col:"sex", group_col:"subject_group"})
+    meta = meta.rename(columns={id_col: "donor_id", sex_col: "sex", group_col: "subject_group"})
     meta["donor_id"] = meta["donor_id"].astype(str).str.strip()
     meta = meta[(meta["donor_id"] != "") & (~meta["donor_id"].isin(mismatches))]
     meta_unique = meta.drop_duplicates("donor_id").copy()
     meta_unique["matrix_id"] = meta_unique["donor_id"]
 
-# Map donors to matrix columns and verify their per-sample PSI files for AnswerALS.
-common = sorted(set(meta_unique["donor_id"].astype(str)) & set(raw["IID"].astype(str)))
+# Map donors to matrix columns and verify per-sample PSI files for TargetALS.
+common = sorted(set(meta_unique["donor_id"].astype(str)) & raw_sample_ids)
 sub_to_matrix, final = {}, []
 junction_counts = Counter()
 
 if experiment == "target_ALS":
-    encodings = ["utf-8","latin1","iso-8859-1","cp1252"]
     for donor in common:
         row = meta_unique[meta_unique["donor_id"].astype(str) == donor].iloc[0]
         prefix = row["matrix_id"]
         matches = [c for c in headers if c.startswith(prefix)]
         if matches:
-            final.append(donor); sub_to_matrix[donor] = matches[0]
+            final.append(donor)
+            sub_to_matrix[donor] = matches[0]
             raw_sample = row["externalsampleid"].replace("-", "_")
             paths = []
             for name in os.listdir("/home/zw529/donglab/data/target_ALS"):
-                path = os.path.join("/home/zw529/donglab/data/target_ALS", name, "RNAseq", "Processed", raw_sample, "leafcutter", "psi", f"{raw_sample}.leafcutter.PSI.tsv")
-                if os.path.exists(path): paths.append(path)
+                path = os.path.join(
+                    "/home/zw529/donglab/data/target_ALS",
+                    name, "RNAseq", "Processed", raw_sample,
+                    "leafcutter", "psi", f"{raw_sample}.leafcutter.PSI.tsv"
+                )
+                if os.path.exists(path):
+                    paths.append(path)
             if paths:
                 try:
-                    psi = pd.read_csv(paths[0], sep=r"\\s+", usecols=["chrom","strand","start","end","reads"])
-                    ids = psi["chrom"].astype(str)+":"+psi["strand"].astype(str)+":"+psi["start"].astype(str)+"-"+psi["end"].astype(str)
+                    psi = pd.read_csv(paths[0], sep=r"\\s+", usecols=["chrom", "strand", "start", "end", "reads"])
+                    ids = (
+                        psi["chrom"].astype(str) + ":" +
+                        psi["strand"].astype(str) + ":" +
+                        psi["start"].astype(str) + "-" +
+                        psi["end"].astype(str)
+                    )
                     junction_counts.update(ids[psi["reads"] >= 5].unique())
-                except Exception: pass
+                except Exception:
+                    pass
     if not final:
         raise SystemExit("No TargetALS samples matched metadata, genotype, matrix, and PSI files.")
-    min_pass = max(1, int(len(final)*0.10))
-    valid_junctions = {j for j,c in junction_counts.items() if c >= min_pass}
+    min_pass = max(1, int(len(final) * 0.10))
+    valid_junctions = {j for j, c in junction_counts.items() if c >= min_pass}
 else:
     for donor in common:
         if donor in headers:
-            final.append(donor); sub_to_matrix[donor] = donor
+            final.append(donor)
+            sub_to_matrix[donor] = donor
     if not final:
         raise SystemExit("No AnswerALS donors matched metadata, genotype, and splicing matrix.")
     valid_junctions = None
@@ -195,7 +240,13 @@ else:
 target_cols = ["junction_id"] + [sub_to_matrix[s] for s in final]
 if "junction_id" not in headers:
     raise SystemExit("Splicing matrix must have a junction_id column.")
-splicing = pd.read_csv("$SPLICING_RAW", sep="\\t", usecols=target_cols, index_col=0, na_values=["NA"])
+splicing = pd.read_csv(
+    "$SPLICING_RAW",
+    sep="\\t",
+    usecols=target_cols,
+    index_col=0,
+    na_values=["NA"]
+)
 splicing = splicing[[sub_to_matrix[s] for s in final]]
 splicing.columns = final
 if valid_junctions is not None:
@@ -203,50 +254,187 @@ if valid_junctions is not None:
 splicing = splicing.loc[splicing.notna().mean(axis=1) >= 0.80]
 splicing = splicing.loc[splicing.var(axis=1, skipna=True) > 1e-10]
 
-snps = raw[raw["IID"].astype(str).isin(final)].set_index("IID").drop(columns=["FID"]).loc[final].T
-numeric = snps.apply(pd.to_numeric, errors="coerce")
-called = numeric.notna().sum(axis=1)
-af = numeric.sum(axis=1, skipna=True)/(2*called)
-maf = np.minimum(af,1-af)
-snps = snps.loc[(called > 0) & (maf >= 0.05)]
-def groups_pass(row):
-    counts = pd.to_numeric(row, errors="coerce").dropna().value_counts()
-    return len(counts) >= 2 and counts.min() >= 5
-snps = snps.loc[snps.apply(groups_pass, axis=1)]
-
 def to_rsid(v):
-    clean = v.rsplit("_",1)[0] if "_" in v else v
+    clean = v.rsplit("_", 1)[0] if "_" in v else v
     parts = str(clean).split(":")
-    if len(parts) < 2: return clean
-    chrom,pos = parts[0],parts[1]
-    ucsc = chrom if chrom.upper().startswith("CHR") else "chr"+chrom
-    ncbi = ucsc_to_ncbi.get(ucsc.upper(),ucsc.upper())
-    return coord_to_rsid.get(f"{ncbi}:{pos}".upper(),clean)
-snps.index = [to_rsid(str(x)) for x in snps.index]
-snps = snps.loc[~snps.index.duplicated(keep="first")]
+    if len(parts) < 2:
+        return clean
+    chrom, pos = parts[0], parts[1]
+    ucsc = chrom if chrom.upper().startswith("CHR") else "chr" + chrom
+    ncbi = ucsc_to_ncbi.get(ucsc.upper(), ucsc.upper())
+    return coord_to_rsid.get(f"{ncbi}:{pos}".upper(), clean)
+
+snp_out = "$OUTDIR/snp_${TISSUE_DIR}.txt"
+
+if experiment == "target_ALS":
+    # Preserve the existing TargetALS genotype filtering and output.
+    snps = raw[raw["IID"].astype(str).isin(final)].set_index("IID").drop(columns=["FID"]).loc[final].T
+    numeric = snps.apply(pd.to_numeric, errors="coerce")
+    called = numeric.notna().sum(axis=1)
+    af = numeric.sum(axis=1, skipna=True) / (2 * called)
+    maf = np.minimum(af, 1 - af)
+    snps = snps.loc[(called > 0) & (maf >= 0.05)]
+
+    def groups_pass(row):
+        counts = pd.to_numeric(row, errors="coerce").dropna().value_counts()
+        return len(counts) >= 2 and counts.min() >= 5
+
+    snps = snps.loc[snps.apply(groups_pass, axis=1)]
+    snps.index = [to_rsid(str(x)) for x in snps.index]
+    snps = snps.loc[~snps.index.duplicated(keep="first")]
+    snps.to_csv(snp_out, sep="\\t", index=True, index_label="snpid", na_rep="NA")
+    snps_count = len(snps)
+
+else:
+    # AnswerALS-only chunked path; keeps the same MAF and genotype-group rules.
+    print("AnswerALS: streaming raw genotypes into a temporary disk-backed matrix...")
+    with open("$RAW", "r") as raw_fh:
+        raw_header = raw_fh.readline().split()
+    if len(raw_header) <= 6 or raw_header[1].lstrip("#") != "IID":
+        raise SystemExit("Unexpected PLINK .raw header; expected FID IID PAT MAT SEX PHENOTYPE followed by variants.")
+
+    variant_ids = raw_header[6:]
+    n_variants = len(variant_ids)
+    n_samples = len(final)
+    final_index = {sample: i for i, sample in enumerate(final)}
+    temp_matrix = os.path.join("$OUTDIR", f".answerALS_sQTL_genotypes_{os.getpid()}.int8")
+    temp_output = snp_out + f".tmp.{os.getpid()}"
+    matrix = None
+    output_installed = False
+
+    try:
+        matrix = np.memmap(temp_matrix, dtype=np.int8, mode="w+", shape=(n_samples, n_variants))
+        found = set()
+
+        with open("$RAW", "r") as raw_fh:
+            next(raw_fh)
+            for line in raw_fh:
+                parts = line.split(None, 6)
+                if len(parts) < 7:
+                    raise SystemExit("Unexpected short row in PLINK .raw file.")
+                sample = parts[1]
+                if sample not in final_index:
+                    continue
+
+                values = np.fromstring(parts[6].replace("NA", "-1"), sep=" ", dtype=np.float32)
+                if values.size != n_variants:
+                    raise SystemExit(
+                        f"PLINK .raw row for {sample} has {values.size} genotype fields; expected {n_variants}."
+                    )
+                missing = ~np.isfinite(values) | (values < 0)
+                observed = values[~missing]
+                if np.any((observed > 2) | (observed != np.floor(observed))):
+                    raise SystemExit(
+                        f"Non-hard-call dosage found for {sample}; expected AnswerALS non-imputed values 0/1/2."
+                    )
+                values[missing] = -1
+                matrix[final_index[sample], :] = values.astype(np.int8)
+                found.add(sample)
+
+        missing_samples = set(final) - found
+        if missing_samples:
+            raise SystemExit("Samples missing from .raw rows: " + ", ".join(sorted(missing_samples)))
+
+        matrix.flush()
+        print(f"AnswerALS: filtering {n_variants:,} variants in 50,000-variant chunks...")
+        keep = np.zeros(n_variants, dtype=bool)
+        chunk_size = 50000
+
+        for start in range(0, n_variants, chunk_size):
+            end = min(start + chunk_size, n_variants)
+            block = matrix[:, start:end]
+            n0 = np.count_nonzero(block == 0, axis=0)
+            n1 = np.count_nonzero(block == 1, axis=0)
+            n2 = np.count_nonzero(block == 2, axis=0)
+            called = n0 + n1 + n2
+            allele_sum = n1 + 2 * n2
+            af = np.divide(
+                allele_sum,
+                2 * called,
+                out=np.zeros_like(allele_sum, dtype=np.float64),
+                where=called > 0
+            )
+            maf = np.minimum(af, 1 - af)
+
+            counts = np.vstack((n0, n1, n2))
+            categories = np.count_nonzero(counts > 0, axis=0)
+            min_group = np.where(counts > 0, counts, np.iinfo(np.int32).max).min(axis=0)
+            keep[start:end] = (called > 0) & (maf >= 0.05) & (categories >= 2) & (min_group >= 5)
+
+            del block, n0, n1, n2, called, allele_sum, af, maf, counts, categories, min_group
+            if end % 500000 == 0 or end == n_variants:
+                print(f"  filtered through {end:,}/{n_variants:,} variants")
+            gc.collect()
+
+        candidate_indices = np.flatnonzero(keep)
+        print(f"AnswerALS: {len(candidate_indices):,} variants pass MAF and genotype-group filters.")
+        seen_ids = set()
+        written = 0
+
+        with open(temp_output, "w") as out_fh:
+            out_fh.write("snpid\\t" + "\\t".join(final) + "\\n")
+            for start in range(0, len(candidate_indices), 10000):
+                positions = candidate_indices[start:start + 10000]
+                selected_positions, selected_ids = [], []
+                for pos in positions:
+                    sid = to_rsid(str(variant_ids[pos]))
+                    if sid not in seen_ids:
+                        seen_ids.add(sid)
+                        selected_positions.append(pos)
+                        selected_ids.append(sid)
+                if not selected_positions:
+                    continue
+
+                values = np.asarray(matrix[:, selected_positions].T, dtype=np.float32)
+                values[values < 0] = np.nan
+                chunk = pd.DataFrame(values, columns=final)
+                chunk.insert(0, "snpid", selected_ids)
+                chunk.to_csv(out_fh, sep="\\t", index=False, header=False, na_rep="NA")
+                written += len(selected_ids)
+                del values, chunk
+                gc.collect()
+
+        os.replace(temp_output, snp_out)
+        output_installed = True
+        snps_count = written
+        print(f"AnswerALS: wrote {snps_count:,} filtered SNPs to {snp_out}")
+
+    finally:
+        if matrix is not None:
+            matrix.flush()
+            del matrix
+        if os.path.exists(temp_matrix):
+            os.remove(temp_matrix)
+        if not output_installed and os.path.exists(temp_output):
+            os.remove(temp_output)
 
 if experiment == "target_ALS":
     cov_full = pd.read_csv("$COV_FILE", sep="\\t")
-    cov = cov_full[["externalsampleid"]+[c for c in cov_full.columns if c not in meta.columns]].drop_duplicates("externalsampleid")
+    cov = cov_full[["externalsampleid"] + [c for c in cov_full.columns if c not in meta.columns]].drop_duplicates("externalsampleid")
     aligned = meta_unique[meta_unique["donor_id"].isin(final)].copy()
-    merged = pd.merge(pd.merge(aligned,cov,on="externalsampleid"),pca,left_on="donor_id",right_on="IID")
-    merged = merged.sort_values("RIN_score",ascending=False).drop_duplicates("donor_id")
-    merged["sex_bin"] = merged["sex"].astype(str).str.lower().map({"male":1,"female":0})
+    merged = pd.merge(pd.merge(aligned, cov, on="externalsampleid"), pca, left_on="donor_id", right_on="IID")
+    merged = merged.sort_values("RIN_score", ascending=False).drop_duplicates("donor_id")
+    merged["sex_bin"] = merged["sex"].astype(str).str.lower().map({"male": 1, "female": 0})
     merged["is_als"] = merged["subject_group"].apply(lambda x: 1 if "ALS" in str(x) else 0)
-    covars = merged.set_index("donor_id").reindex(final)[["sex_bin","age_at_death","PC1","PC2","PC3","PC4","PC5","is_als"]].T
+    covars = merged.set_index("donor_id").reindex(final)[
+        ["sex_bin", "age_at_death", "PC1", "PC2", "PC3", "PC4", "PC5", "is_als"]
+    ].T
 else:
     aligned = meta_unique[meta_unique["donor_id"].isin(final)].copy()
-    merged = pd.merge(aligned,pca,left_on="donor_id",right_on="IID",how="inner")
+    merged = pd.merge(aligned, pca, left_on="donor_id", right_on="IID", how="inner")
     if len(merged) != len(final):
         raise SystemExit("Some AnswerALS donors lack genotype PCA rows.")
-    merged["sex_bin"] = merged["sex"].astype(str).str.lower().map({"male":1,"female":0})
-    merged["is_als"] = merged["subject_group"].astype(str).str.contains(r"\\bALS\\b",case=False,na=False).astype(int)
-    covars = merged.set_index("donor_id").reindex(final)[["sex_bin","PC1","PC2","PC3","PC4","PC5","is_als"]].T
+    merged["sex_bin"] = merged["sex"].astype(str).str.lower().map({"male": 1, "female": 0})
+    merged["is_als"] = merged["subject_group"].astype(str).str.contains(
+        r"\\bALS\\b", case=False, na=False
+    ).astype(int)
+    covars = merged.set_index("donor_id").reindex(final)[
+        ["sex_bin", "PC1", "PC2", "PC3", "PC4", "PC5", "is_als"]
+    ].T
 
-splicing.to_csv("$OUTDIR/splicing_${TISSUE_DIR}.txt",sep="\\t",index=True,index_label="geneid",na_rep="NA")
-snps.to_csv("$OUTDIR/snp_${TISSUE_DIR}.txt",sep="\\t",index=True,index_label="snpid",na_rep="NA")
-covars.to_csv("$OUTDIR/covariates_${TISSUE_DIR}_encoded.txt",sep="\\t",index=True,index_label="id",na_rep="NA")
-print(f"SUCCESS: Generated filtered datasets for {len(final)} samples; {len(splicing)} junctions, {len(snps)} SNPs.")
+splicing.to_csv("$OUTDIR/splicing_${TISSUE_DIR}.txt", sep="\\t", index=True, index_label="geneid", na_rep="NA")
+covars.to_csv("$OUTDIR/covariates_${TISSUE_DIR}_encoded.txt", sep="\\t", index=True, index_label="id", na_rep="NA")
+print(f"SUCCESS: Generated filtered datasets for {len(final)} samples; {len(splicing)} junctions, {snps_count} SNPs.")
 EOF
 
 echo "Generating location files..."
@@ -261,7 +449,8 @@ BEGIN {
     split($2,p,":"); chrom=p[1]; pos=p[2]
     ucsc=(chrom ~ /^[Cc][Hh][Rr]/)?toupper(chrom):"CHR"toupper(chrom)
     ncbi=(ucsc in n_map)?n_map[ucsc]:ucsc
-    id=(toupper(ncbi":"pos) in r_map)?r_map[toupper(ncbi":"pos)]:ncbi":"pos
+    key=toupper(ncbi":"pos)
+    id=(key in r_map)?r_map[key]:ncbi":"pos
     final_chr=(toupper(ncbi) in inv_map)?inv_map[toupper(ncbi)]:chrom
     if (!seen[id]++) print id,final_chr,pos
 }' "$BIM" >> "$OUTDIR/snp_location.txt"
