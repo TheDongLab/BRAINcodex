@@ -31,7 +31,6 @@ GTF=Path(sys.argv[4])
 TISSUES=[
     "Cortex",
     "Spinal_Cord",
-    "Thoracic_Spinal_Cord",
     "Cerebellum",
     "Frontal_Cortex",
     "Cervical_Spinal_Cord",
