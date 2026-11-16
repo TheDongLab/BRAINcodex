@@ -814,10 +814,10 @@ make_panel <- function(g, show_title = FALSE, show_legend = FALSE) {
     }
   }
 
-  # LeafViz colors: annotated red, unannotated/cryptic pink.
+  # LeafViz colors: annotated red, unannotated/cryptic blue.
   p <- p +
     scale_colour_manual(
-      values = c(annotated = "red", cryptic = "pink"),
+      values = c(annotated = "red", cryptic = "dodgerblue"),
       breaks = c("annotated", "cryptic"),
       labels = c("annotated", "cryptic"),
       name = NULL,
