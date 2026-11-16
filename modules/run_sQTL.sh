@@ -2,7 +2,8 @@
 #SBATCH --job-name=run_sQTL
 #SBATCH --output=/home/zw529/donglab/data/answer_ALS/QTL/run_sQTL_%j.out
 #SBATCH --error=/home/zw529/donglab/data/answer_ALS/QTL/run_sQTL_%j.err
-#SBATCH --time=24:00:00
+#SBATCH --partition=week
+#SBATCH --time=6-23:00:00
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=64G
 
