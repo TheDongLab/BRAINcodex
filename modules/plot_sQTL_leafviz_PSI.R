@@ -2,12 +2,8 @@
 
 # Static LeafViz-style plot. Existing calls default to genotype mode unchanged.
 # Opt in: --group-by tdp43 (no genotype or variant arguments required).
-# Optional --tdp43 <aligned CSV> and --pathology <original pathology CSV>;
-# defaults are aligned_rnaseq_tdp43_by_subject.csv and
-# collections.postmortem_tissue_core.semiquantitative_tdp43_data.csv under --data-root.
-# TDP43 mode matches subject + RNA sample + tissue, verifies pathology provenance,
-# selects one highest-valid-RIN sample per subject before inspecting event coverage,
-# excludes missing/conflicting/unsupported scores, and writes mapping/count audits.
+# Optional --tdp43 <aligned CSV> and --pathology <original pathology CSV>; defaults are aligned_rnaseq_tdp43_by_subject.csv and collections.postmortem_tissue_core.semiquantitative_tdp43_data.csv under --data-root.
+# TDP43 mode matches subject + RNA sample + tissue, verifies pathology provenance, selects one highest-valid-RIN sample per subject before inspecting event coverage, excludes missing/conflicting/unsupported scores, and writes mapping/count audits.
 # Arcs show unweighted mean original junction PSI, never normalized to displayed junctions.
 # Optional --psi-matrix: override matching junctions using QTL matrix subject columns.
 # The matrix must contain the anchor; other displayed junctions use source-file PSI.
@@ -860,10 +856,10 @@ make_panel <- function(g, show_title = FALSE, show_legend = FALSE) {
     }
   }
 
-  # LeafViz colors: annotated red, unannotated/cryptic pink.
+  # LeafViz colors: annotated red, unannotated/cryptic blue.
   p <- p +
     scale_colour_manual(
-      values = c(annotated = "red", cryptic = "pink"),
+      values = c(annotated = "red", cryptic = "dodgerblue"),
       breaks = c("annotated", "cryptic"),
       labels = c("annotated", "cryptic"),
       name = NULL,
