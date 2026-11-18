@@ -3,6 +3,7 @@
 #SBATCH --output=/home/zw529/donglab/data/target_ALS/QTL/generate_important_SNP_table.out
 #SBATCH --error=/home/zw529/donglab/data/target_ALS/QTL/generate_important_SNP_table.err
 #SBATCH --time=06:00:00
+#SBATCH --partition=day
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=32G
 set -euo pipefail
@@ -690,36 +691,47 @@ pd.DataFrame(manifest_rows, columns=manifest_columns).drop_duplicates(['SNP', 't
 print(f"Manifest: {OUTDIR / 'HIGH_MEDIUM_plot_manifest.tsv'}", flush=True)
 
 def write_trait_summary(pairs, evidence, destination):
-    group_columns = ['qtl_type', 'trait']
-    fields = group_columns + ['gene_symbols', 'original_traits', 'tissues', 'n_tissues', 'n_significant_QTL_SNPs', 'n_HIGH_MEDIUM_SNPs', 'n_GWAS_nominal_SNPs', 'n_GWAS_genomewide_SNPs', 'all_significant_SNPs', 'lead_SNP', 'lead_validation_priority', 'lead_evidence_count', 'lead_GWAS_p', 'lead_GWAS_beta', 'lead_GWAS_effect_allele', 'lead_best_trait_FDR', 'lead_trait_tissues', 'lead_SNP_evidence', 'lead_selection_reason', 'evidence_scope'] + ['n_SNPs_with_' + c for c in score_cols]
+    fields = ['gene', 'qtl_types', 'tissues', 'n_unique_significant_SNPs', 'n_HIGH_MEDIUM_SNPs', 'n_traits', 'eQTL_traits', 'sQTL_traits', 'cQTL_traits', 'circ_eQTL_traits', 'HIGH_MEDIUM_SNPs', 'SNP_trait_associations', 'lead_SNP', 'lead_priority', 'lead_evidence_count', 'lead_GWAS_p', 'lead_reason', 'HIGH_MEDIUM_SNP_evidence', 'all_significant_SNPs'] + ['n_SNPs_with_' + c for c in score_cols]
+    expanded = []
+    for pair in pairs:
+        genes = [g for g in pair['gene_symbols'].split(';') if g]
+        for gene in genes or ['UNANNOTATED:' + pair['qtl_type'] + ':' + pair['trait']]:
+            expanded.append(dict(pair, gene=gene))
     results = []
-    if pairs:
-        frame = pd.DataFrame(pairs).drop_duplicates(['SNP', 'trait', 'tissue', 'qtl_type'])
-        for ((q, trait), group) in frame.groupby(group_columns, sort=True):
+    if expanded:
+        frame = pd.DataFrame(expanded).drop_duplicates(['gene', 'SNP', 'trait', 'tissue', 'qtl_type'])
+        for (gene, group) in frame.groupby('gene', sort=True):
             ids = sorted(set(group.SNP))
             ev = evidence.loc[ids].copy().reset_index(drop=True)
             candidates = ev[ev.validation_priority.isin(['HIGH', 'MEDIUM'])].copy()
             if candidates.empty:
                 continue
             candidates['_priority'] = candidates.validation_priority.map({'HIGH': 0, 'MEDIUM': 1})
-            qcols = [q + '_' + x for x in ('SMR_significant', 'HEIDI_pass', 'coloc_significant', 'SuSiE_credible_set')]
-            candidates['_q_support'] = candidates[qcols].astype(int).sum(axis=1)
-            candidates['_fdr'] = candidates.SNP.map(group.groupby('SNP').FDR.min())
             candidates['_gwas'] = pd.to_numeric(candidates.GWAS_p, errors='coerce')
-            lead = candidates.sort_values(['_priority', 'evidence_count', '_q_support', '_gwas', '_fdr', 'SNP'], ascending=[True, False, False, True, True, True], na_position='last').iloc[0]
-            pvalues = pd.to_numeric(ev.GWAS_p, errors='coerce')
-            lead_rows = group[group.SNP == lead.SNP]
-            record = dict(qtl_type=q, trait=trait, gene_symbols=';'.join(sorted({v for x in group.gene_symbols for v in x.split(';') if v})), original_traits=';'.join(sorted(set(group.original_trait))), tissues=';'.join(sorted(set(group.tissue))), n_tissues=group.tissue.nunique(), n_significant_QTL_SNPs=len(ids), n_HIGH_MEDIUM_SNPs=len(candidates), n_GWAS_nominal_SNPs=int((pvalues < 0.05).sum()), n_GWAS_genomewide_SNPs=int((pvalues < 5e-08).sum()), all_significant_SNPs=','.join(ids), lead_SNP=lead.SNP, lead_validation_priority=lead.validation_priority, lead_evidence_count=int(lead.evidence_count), lead_GWAS_p=lead.GWAS_p, lead_GWAS_beta=lead.GWAS_beta, lead_GWAS_effect_allele=lead.GWAS_effect_allele, lead_best_trait_FDR=lead_rows.FDR.min(), lead_trait_tissues=';'.join(sorted(set(lead_rows.tissue))), lead_SNP_evidence=describe_snp_evidence(lead.evidence_categories), lead_selection_reason='Ranked by HIGH before MEDIUM, evidence count descending, same-QTL-type SMR/HEIDI/coloc/SuSiE flag count descending, GWAS p ascending, trait FDR ascending, SNP ID ascending', evidence_scope='QTL significance/FDR and tissues are trait-specific; other evidence flags are SNP-wide and may refer to other traits/tissues. SNP counts include only variants in the input GWAS; counts do not imply independent signals.')
+            candidates['_fdr'] = candidates.SNP.map(group.groupby('SNP').FDR.min())
+            candidates = candidates.sort_values(['_priority', 'evidence_count', '_gwas', '_fdr', 'SNP'], ascending=[True, False, True, True, True], na_position='last')
+            lead = candidates.iloc[0]
+            example_ids = list(candidates.SNP)
+            links = []
+            for snp in example_ids:
+                sub = group[group.SNP == snp]
+                annotations = []
+                for ((q, trait), hit) in sub.groupby(['qtl_type', 'original_trait'], sort=True):
+                    annotations.append(q + ':' + trait + ' [' + ','.join(sorted(set(hit.tissue))) + ']')
+                links.append(snp + ' => ' + ' | '.join(annotations))
+            record = dict(gene=gene, qtl_types=','.join(sorted(set(group.qtl_type))), tissues=','.join(sorted(set(group.tissue))), n_unique_significant_SNPs=len(ids), n_HIGH_MEDIUM_SNPs=len(candidates), n_traits=len(group[['qtl_type', 'trait']].drop_duplicates()), HIGH_MEDIUM_SNPs=','.join(example_ids), SNP_trait_associations='; '.join(links), lead_SNP=lead.SNP, lead_priority=lead.validation_priority, lead_evidence_count=int(lead.evidence_count), lead_GWAS_p=lead.GWAS_p, lead_reason=str(lead.validation_priority) + '; ' + str(int(lead.evidence_count)) + ' evidence points; GWAS p=' + str(lead.GWAS_p) + '; ' + describe_snp_evidence(lead.evidence_categories), HIGH_MEDIUM_SNP_evidence='; '.join((str(row.SNP) + ' => ' + describe_snp_evidence(row.evidence_categories) for row in candidates.itertuples())), all_significant_SNPs=','.join(ids))
+            for q in QTLS:
+                record[q + '_traits'] = ','.join(sorted(set(group.loc[group.qtl_type == q, 'original_trait'])))
             for c in score_cols:
                 record['n_SNPs_with_' + c] = int(ev[c].astype(bool).sum())
             results.append(record)
     result = pd.DataFrame(results, columns=fields)
     if not result.empty:
-        result['_priority'] = result.lead_validation_priority.map({'HIGH': 0, 'MEDIUM': 1})
-        result = result.sort_values(['_priority', 'lead_evidence_count', 'lead_GWAS_p', 'qtl_type', 'trait'], ascending=[True, False, True, True, True], na_position='last').drop(columns='_priority')
+        result['_priority'] = result.lead_priority.map({'HIGH': 0, 'MEDIUM': 1})
+        result = result.sort_values(['_priority', 'lead_evidence_count', 'lead_GWAS_p', 'gene'], ascending=[True, False, True, True], na_position='last').drop(columns='_priority')
     result.to_csv(destination, sep='\t', index=False, na_rep='NA')
-    print(f'Gene/event summary: {destination} ({len(result)} rows)', flush=True)
-write_trait_summary(trait_pairs, snp_records, OUTDIR / 'HIGH_MEDIUM_gene_event_summary.tsv')
+    print(f'Gene summary: {destination} ({len(result)} rows)', flush=True)
+write_trait_summary(trait_pairs, snp_records, OUTDIR / 'HIGH_MEDIUM_gene_summary.tsv')
 print()
 print('=' * 72)
 print('DONE')
