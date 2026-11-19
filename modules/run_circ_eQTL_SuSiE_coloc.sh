@@ -21,7 +21,7 @@ if [[ "$MODE" == "submit" ]]; then
   RUN_ROOT="$BASE/MR/circ_eQTL_SuSiE_coloc_runs/$RUN_ID"
   mkdir -p "$RUN_ROOT/logs" "$RUN_ROOT/task_summaries" "$RUN_ROOT/task_outputs"
 
-  # Slurm runs a spool copy of this file; preserve it at a shared path before submitting children so they can still read it after this launcher exits.
+  # Slurm runs a spool copy of this file; preserve it at a shared path before submitting children so they can still read it after this launcher exits
   cp -- "$SCRIPT_PATH" "$RUN_ROOT/submitted_script.sh"
   SCRIPT_PATH="$RUN_ROOT/submitted_script.sh"
 
@@ -213,7 +213,7 @@ master<-list()
 
 for(tissue in TISSUES){
   mrdir<-file.path(BASE,tissue,"MR")
-  snpfile<-file.path(mrdir,"circ_eQTL_MR",paste0(tissue,"_circ_eQTL_SNP_results.tsv.gz"))
+  snpfile<-file.path(mrdir,paste0(tissue,"_circ_eQTL_SNP_results.tsv.gz"))
   outroot<-file.path(RUN_ROOT,"task_outputs",sprintf("task_%02d",TASK_ID),tissue)
 
   eqtldir<-file.path(BASE,tissue,"circ_eQTL"); resultdir<-file.path(eqtldir,"results")
