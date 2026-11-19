@@ -16,7 +16,7 @@ EXPERIMENT="${EXPERIMENT:-target_ALS}"
 [[ "$EXPERIMENT" == "target_ALS" || "$EXPERIMENT" == "answer_ALS" ]] || { echo "ERROR: EXPERIMENT must be target_ALS or answer_ALS" >&2; exit 1; }
 
 BASE="$HOME/donglab/data/$EXPERIMENT"
-GLOBAL="$BASE/MR/circ_eQTL_MR"
+GLOBAL="$BASE/MR"
 # Requires circRNA QTL effects already harmonized to GWAS effect alleles.
 # Same input filename as the gene workflow; geneid or circ_id must hold circ IDs.
 ROOT="${CIRC_MR_ROOT:-$HOME/donglab/data/GCST90027163/GWAS/circ_eQTL_harmonization}"
@@ -64,7 +64,7 @@ relationship_by_tissue={}; snp_by_tissue={}; summaries=[]
 # ==============================================================
 for tissue in TISSUES:
     infile=f"{ROOT}/{tissue}/{tissue}_SNP_gene_MR_ready.tsv.gz"
-    out=f"{BASE}/{tissue}/MR/circ_eQTL_MR"; os.makedirs(out,exist_ok=True)
+    out=f"{BASE}/{tissue}/MR"; os.makedirs(out,exist_ok=True)
     if not os.path.isfile(infile) or os.path.getsize(infile)==0: raise FileNotFoundError(f"Missing/empty: {infile}")
 
     print(f"\n{'='*70}\n{tissue}\n{'='*70}")
@@ -185,7 +185,7 @@ global_fdr=global_snp.set_index("snpid")["FDR_ALS_global"]
 # 3. WRITE CONSOLIDATED circ-eQTL OUTPUTS
 # ==============================================================
 for tissue in TISSUES:
-    out=f"{BASE}/{tissue}/MR/circ_eQTL_MR"
+    out=f"{BASE}/{tissue}/MR"
 
     snp=snp_by_tissue[tissue].copy()
     snp["FDR_ALS_global"]=snp["snpid"].map(global_fdr)
