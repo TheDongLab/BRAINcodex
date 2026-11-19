@@ -9,6 +9,8 @@
 
 # Annotate ONLY HIGH_MEDIUM_SNPs in the existing gene-focused table.
 # Usage: sbatch run_motifbreakR_SnpEff.sh
+# Existing annotated table: sbatch run_motifbreakR_SnpEff.sh --reformat-only --table /path/to/table.tsv
+# Readable summaries in the main table; full flat details and background SNPs saved separately.
 # Preflight: bash run_motifbreakR_SnpEff.sh --check
 # Overrides: --root DIR --table TSV --vcf VCF.gz --reference FASTA --snpeff-db NAME
 # Keep this and the evidence/plotting jobs sequential if they write the same table.
@@ -80,8 +82,154 @@ write.table(detail,file.path(outdir,"motifbreakR.details.tsv"),sep="\t",quote=TR
 writeLines("completed",file.path(outdir,"motifbreakR.completed"))
 '''
 
-NEW_COLUMNS = ["SnpEff_by_SNP", "SnpEff_matching_gene_by_SNP", "motifbreakR_by_SNP",
-               "functional_annotation_details"]
+# Columns intentionally reformatted or moved out of the gene summary.
+LEGACY_COLUMNS = ['SnpEff_by_SNP', 'SnpEff_matching_gene_by_SNP',
+                  'motifbreakR_by_SNP', 'functional_annotation_details']
+MOVED_COLUMNS = ['all_significant_SNPs', 'lead_priority']
+NEW_COLUMNS = ['SnpEff_max_impact', 'SnpEff_consequences', 'SnpEff_matching_gene',
+               'SnpEff_transcripts', 'SnpEff_warnings', 'motifbreakR_predictions',
+               'motifbreakR_strong_TFs']
+
+
+def normalized_gene(value):
+    return re.sub(r'\.\d+$', '', str(value)).upper()
+
+
+def unique_text(values):
+    return ' | '.join(dict.fromkeys(str(x) for x in values if str(x)))
+
+
+def score_number(value):
+    try:
+        value = float(value)
+        return value if math.isfinite(value) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def motif_description(hit):
+    name = hit.get('TF') or 'unknown TF'
+    motif = hit.get('motif_ID') or 'unknown motif'
+    strength = hit.get('effect') or 'unreported effect'
+    ref, alt = score_number(hit.get('scoreRef')), score_number(hit.get('scoreAlt'))
+    if ref is not None and alt is not None:
+        delta = alt-ref
+        direction = 'stronger motif match' if delta > 0 else 'weaker motif match' if delta < 0 else 'unchanged motif score'
+        change = f'{direction}; delta_score={delta:+.4g}'
+    else:
+        change = 'score change unavailable'
+    return f'{name} [{motif}] ({strength}; {change})'
+
+
+def decode_annotations(row, column, wanted):
+    try:
+        data = json.loads(row[column])
+    except (KeyError, ValueError, TypeError) as error:
+        fail(f'Invalid/missing {column} for {row.get("gene", "?")}: {error}')
+    if not isinstance(data, dict) or set(data) != set(wanted):
+        fail(f'{column} SNP keys differ from HIGH_MEDIUM_SNPs for {row.get("gene", "?")}')
+    return data
+
+
+def readable_annotations(rows, per_row, folder):
+    """Convert existing predictions, with no new inference or tool execution."""
+    folder = Path(folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    answer = []; se_detail = {}; mb_detail = {}; all_pairs = set()
+    source_se = {}; source_mb = {}
+    impact_rank = {'HIGH':0, 'MODERATE':1, 'LOW':2, 'MODIFIER':3}
+    for row, ids in zip(rows, per_row):
+        se = decode_annotations(row, 'SnpEff_by_SNP', ids)
+        mb = decode_annotations(row, 'motifbreakR_by_SNP', ids)
+        new = {k:v for k,v in row.items() if k not in LEGACY_COLUMNS+MOVED_COLUMNS+NEW_COLUMNS}
+        if 'lead_reason' in new:
+            new['lead_reason'] = re.sub(r'^\s*(?:HIGH|MEDIUM|LOW|GWAS_ONLY|MOLECULAR_ONLY|NONE)\s*;\s*\d+\s+evidence points?\s*;\s*', '', new['lead_reason'])
+        columns = {c:[] for c in NEW_COLUMNS}
+        gene = row.get('gene', '')
+        for snp in ids:
+            a, b = se[snp], mb[snp]
+            if not isinstance(a,dict) or not isinstance(b,dict) or not isinstance(a.get('effects'),list) or not isinstance(b.get('hits'),list):
+                fail(f'Malformed annotation arrays for {snp}')
+            if a.get('status') not in {'annotated','no_ANN_returned'} or b.get('status') not in {'motif_hits','no_hits_at_selected_threshold'}:
+                fail(f'Unknown annotation status for {snp}; cannot interpret it as a negative result')
+            if bool(a['effects']) != (a.get('status')=='annotated') or bool(b['hits']) != (b.get('status')=='motif_hits'):
+                fail(f'Annotation status conflicts with results for {snp}')
+            if a.get('variant') != b.get('variant') or not a.get('variant'):
+                fail(f'SnpEff/motifbreakR variant mismatch for {snp}')
+            for seen,data in [(source_se,a),(source_mb,b)]:
+                canonical = as_json(data)
+                if snp in seen and seen[snp] != canonical:
+                    fail(f'Conflicting repeated predictions for {snp}; table was not changed')
+                seen[snp] = canonical
+            effects = sorted(a['effects'],key=lambda e:(impact_rank.get(e.get('impact'),99),e.get('gene',''),e.get('consequence',''),e.get('transcript','')))
+            def consequence_text(items):
+                return unique_text(f"{e.get('gene') or e.get('gene_id') or 'unknown gene'}: {e.get('consequence') or 'unreported'} ({e.get('impact') or 'unreported'})" for e in items)
+            matches = [e for e in effects if normalized_gene(gene) in {normalized_gene(e.get('gene','')),normalized_gene(e.get('gene_id',''))}]
+            columns['SnpEff_consequences'].append(snp+' => '+(consequence_text(effects) or 'no ANN returned'))
+            columns['SnpEff_matching_gene'].append(snp+' => '+(consequence_text(matches) or 'no annotation matching '+gene))
+            impacts = sorted({e.get('impact') for e in effects if e.get('impact')},key=lambda i:(impact_rank.get(i,99),i))
+            columns['SnpEff_max_impact'].append(snp+' => '+(impacts[0] if impacts else 'unavailable'))
+            transcript_text = unique_text(f"{e.get('gene') or e.get('gene_id') or 'unknown gene'}/{e.get('transcript') or 'no transcript'}: "+', '.join(v for v in [e.get('HGVS_c'),e.get('HGVS_p')] if v) for e in effects)
+            columns['SnpEff_transcripts'].append(snp+' => '+(transcript_text or 'no ANN returned'))
+            warnings = unique_text(e.get('warnings','') for e in effects)
+            columns['SnpEff_warnings'].append(snp+' => '+(warnings or ('none reported' if effects else 'unavailable: no ANN returned')))
+            hits = sorted(b['hits'], key=lambda h:({'strong':0,'weak':1,'neutral':2}.get(h.get('effect'),3),h.get('TF',''),h.get('motif_ID',''),h.get('strand','')))
+            columns['motifbreakR_predictions'].append(snp+' => '+(unique_text(motif_description(h) for h in hits) or 'no motif hits at the tested threshold'))
+            strong = sorted({h.get('TF') or h.get('motif_ID') or 'unknown TF' for h in hits if h.get('effect')=='strong'})
+            columns['motifbreakR_strong_TFs'].append(snp+' => '+(', '.join(strong) or ('none among reported hits' if hits else 'no motif hits at the tested threshold')))
+            for e in effects:
+                entry = dict(SNP=snp,variant_key=a['variant'],**e)
+                se_detail[as_json(entry)] = entry
+            for h in hits:
+                entry = dict(SNP=snp,variant_key=b['variant'],**h)
+                mb_detail[as_json(entry)] = entry
+        new.update({c:'; '.join(columns[c]) for c in NEW_COLUMNS})
+        for snp in row.get('all_significant_SNPs','').split(','):
+            if snp.strip(): all_pairs.add((gene,snp.strip()))
+        answer.append(new)
+    se_fields = ['SNP','variant_key','consequence','impact','gene','gene_id','transcript','HGVS_c','HGVS_p','warnings']
+    mb_fields = ['SNP','variant_key','TF','motif_ID','effect','pctRef','pctAlt','scoreRef','scoreAlt','alleleDiff','chrom','start','end','strand','source']
+    write_table(folder/'SnpEff.SNP_details.tsv',se_fields,sorted(se_detail.values(),key=lambda r:(r['SNP'],r.get('gene',''),r.get('transcript',''),r.get('consequence',''))))
+    write_table(folder/'motifbreakR.SNP_details.tsv',mb_fields,sorted(mb_detail.values(),key=lambda r:(r['SNP'],r.get('TF',''),r.get('motif_ID',''),r.get('strand',''))))
+    if all_pairs:
+        write_table(folder/'all_significant_gene_SNPs.tsv',['gene','SNP'],[dict(gene=g,SNP=s) for g,s in sorted(all_pairs)])
+    (folder/'annotation_column_notes.txt').write_text(
+        'Each annotation starts with the selected rsID. No predictions or evidence scores were recalculated.\n'
+        'SnpEff_consequences and SnpEff_max_impact include all SnpEff genes for each selected variant.\n'
+        'SnpEff_matching_gene includes only exact symbol or version-stripped Ensembl gene-ID matches to the row gene.\n'
+        'No matching annotation does not exclude a distal regulatory effect on the row gene.\n'
+        'Consequence summaries deduplicate transcript repetitions; every transcript/HGVS change is retained in SnpEff_transcripts and SnpEff.SNP_details.tsv.\n'
+        'motifbreakR score direction is scoreAlt minus scoreRef. Strong/weak describe motif predictions, not measured TF occupancy or ALS risk.\n'
+        'All motif hits are retained in motifbreakR.SNP_details.tsv. No hits means none passed the selected method/threshold, not no biological effect.\n'
+        'all_significant_SNPs is moved to all_significant_gene_SNPs.tsv when present; HIGH_MEDIUM_SNPs and original counts remain in the main table.\n'
+        'Counts n_SNPs_with_* retain their original scope across significant SNPs; annotations cover HIGH_MEDIUM_SNPs only.\n'
+        'lead_priority and the repeated priority/point-count prefix of lead_reason are omitted from the summary.\n')
+    return answer
+
+
+def reformat_existing(args):
+    if args.check:
+        fail('--check and --reformat-only are separate modes')
+    table=args.table
+    if not table.is_file(): fail('Missing input table: '+str(table))
+    with Path(str(table)+'.motif_SnpEff.lock').open('a') as lock:
+        try: fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        except BlockingIOError: fail('Another annotation job is updating this table')
+        digest=sha256(table);fields,rows=read_table(table)
+        if not {'gene','HIGH_MEDIUM_SNPs'}.issubset(fields): fail('Table requires gene and HIGH_MEDIUM_SNPs')
+        if not {'SnpEff_by_SNP','motifbreakR_by_SNP'}.issubset(fields):
+            if set(NEW_COLUMNS).issubset(fields):
+                print('Table already has readable annotation columns; no changes made.',flush=True);return
+            fail('Reformat mode needs the original SnpEff_by_SNP and motifbreakR_by_SNP JSON columns; no tools will be rerun')
+        per_row,ids=selected_snps(rows)
+        base=table.parent/'motifbreakR_SnpEff';base.mkdir(parents=True,exist_ok=True)
+        folder=Path(tempfile.mkdtemp(prefix='reformatted_'+datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ')+'_',dir=base))
+        after=readable_annotations(rows,per_row,folder)
+        backup=atomic_merge(table,fields,rows,after,digest,folder)
+        (folder/'reformat_metadata.json').write_text(json.dumps(dict(input_table=str(table),input_sha256=digest,
+            gene_rows=len(rows),selected_unique_SNPs=len(ids),mode='reformat_only',predictions_rerun=False),indent=2)+'\n')
+        print(f'DONE: reformatted {len(rows)} gene rows and {len(ids)} unique selected SNPs. No annotation tools executed.\nTable: {table}\nBackup: {backup}\nFlat detail files: {folder}',flush=True)
+
 
 def fail(message):
     raise RuntimeError(message)
@@ -316,14 +464,17 @@ def merge_annotations(rows, per_row, expected, snpeff, motifs, folder):
         new.update(SnpEff_by_SNP=as_json(snp_data),SnpEff_matching_gene_by_SNP=as_json(gene_data),
                    motifbreakR_by_SNP=as_json(motif_data),functional_annotation_details=str(folder))
         answer.append(new)
-    return answer
+    return readable_annotations(answer, per_row, folder)
 
 def atomic_merge(table, fields, before, after, digest, folder):
     if sha256(table) != digest: fail('Input table changed while annotation ran; refusing to overwrite it')
     if len(before)!=len(after): fail('Row count changed during merge')
-    original_fields = [c for c in fields if c not in NEW_COLUMNS]
+    original_fields = [c for c in fields if c not in NEW_COLUMNS+LEGACY_COLUMNS+MOVED_COLUMNS]
     for old,new in zip(before,after):
-        if any(old[c]!=new[c] for c in original_fields): fail('An existing field changed during annotation')
+        if any(old[c]!=new[c] for c in original_fields if c != 'lead_reason'): fail('An existing field changed during annotation')
+        if 'lead_reason' in original_fields:
+            expected_reason=re.sub(r'^\s*(?:HIGH|MEDIUM|LOW|GWAS_ONLY|MOLECULAR_ONLY|NONE)\s*;\s*\d+\s+evidence points?\s*;\s*', '', old['lead_reason'])
+            if new['lead_reason'] != expected_reason: fail('Unexpected lead_reason change')
     columns=original_fields+NEW_COLUMNS
     backup=folder/(table.name+'.before_annotation')
     shutil.copy2(table,backup)
@@ -360,6 +511,7 @@ def arguments():
     p.add_argument('--rscript',default=os.environ.get('RSCRIPT_BIN','Rscript'))
     p.add_argument('--threads',type=int,default=int(os.environ.get('SLURM_CPUS_PER_TASK','4')))
     p.add_argument('--motif-threshold',type=float,default=1e-4)
+    p.add_argument('--reformat-only',action='store_true',help='Convert existing JSON annotations into readable columns without VCF extraction or tool execution.')
     p.add_argument('--check',action='store_true',help='Check selected SNPs, installed tools/references and R dependencies; no annotation or table edits.')
     a=p.parse_args()
     a.root=a.root.expanduser().resolve()
@@ -377,6 +529,8 @@ def arguments():
 
 def main():
     a=arguments()
+    if a.reformat_only:
+        reformat_existing(a);return
     for path in [a.table,a.evidence,a.vcf,a.reference,a.plink_raw]:
         if not path.is_file(): fail(f'Missing input: {path}')
     fields,rows=read_table(a.table)
@@ -461,7 +615,7 @@ def main():
         (folder/'run_metadata.json').write_text(json.dumps(metadata,indent=2)+'\n')
         backup=atomic_merge(a.table,fields,rows,after,digest,folder)
         print(f'DONE: {a.table}\nBackup: {backup}\nDetails: {folder}',flush=True)
-        print('Only four annotation columns added/refreshed. Scores, priority, lead SNPs and existing rows preserved.',flush=True)
+        print('Readable SNP-linked annotation columns written. Original scores, lead SNPs and gene rows preserved; background SNP lists exported separately.',flush=True)
 
 if __name__=='__main__':
     try: main()
