@@ -1,12 +1,150 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=circ_eQTL_SuSiE_coloc
-#SBATCH --output=/home/zw529/donglab/data/target_ALS/MR/circ_eQTL_SuSiE_coloc.out
-#SBATCH --error=/home/zw529/donglab/data/target_ALS/MR/circ_eQTL_SuSiE_coloc.err
-#SBATCH --time=08:00:00
-#SBATCH --mem=80G
-#SBATCH --cpus-per-task=4
+#SBATCH --output=/home/zw529/donglab/data/answer_ALS/MR/circ_eQTL_SuSiE_coloc.out
+#SBATCH --error=/home/zw529/donglab/data/answer_ALS/MR/circ_eQTL_SuSiE_coloc.err
+#SBATCH --time=00:10:00
+#SBATCH --mem=1G
+#SBATCH --cpus-per-task=1
 
 set -euo pipefail
+
+# Submit this file with `sbatch --export=ALL,EXPERIMENT=answer_ALS SCRIPT.sh`.
+# It submits 50 array workers and a final aggregation job
+MODE="${1:-submit}"
+EXPERIMENT="${EXPERIMENT:-target_ALS}"
+[[ "$EXPERIMENT" == "target_ALS" || "$EXPERIMENT" == "answer_ALS" ]] || { echo "ERROR: EXPERIMENT must be target_ALS or answer_ALS" >&2; exit 1; }
+BASE="$HOME/donglab/data/$EXPERIMENT"
+SCRIPT_PATH="$(readlink -f "$0")"
+
+if [[ "$MODE" == "submit" ]]; then
+  RUN_ID="$(date +%Y%m%d_%H%M%S)_$$"
+  RUN_ROOT="$BASE/MR/circ_eQTL_SuSiE_coloc_runs/$RUN_ID"
+  mkdir -p "$RUN_ROOT/logs" "$RUN_ROOT/task_summaries" "$RUN_ROOT/task_outputs"
+
+  # Slurm runs a spool copy of this file; preserve it at a shared path before submitting children so they can still read it after this launcher exits.
+  cp -- "$SCRIPT_PATH" "$RUN_ROOT/submitted_script.sh"
+  SCRIPT_PATH="$RUN_ROOT/submitted_script.sh"
+
+  ARRAY_ID=$(sbatch --parsable --array=0-49%50 \
+    --time=23:45:00 --mem=80G --cpus-per-task=4 \
+    --export="ALL,EXPERIMENT=$EXPERIMENT,RUN_ROOT=$RUN_ROOT,H4_REFERENCE=0.80" \
+    --output="$RUN_ROOT/logs/task_%A_%a.out" \
+    --error="$RUN_ROOT/logs/task_%A_%a.err" \
+    "$SCRIPT_PATH" worker) || exit 1
+  ARRAY_ID="${ARRAY_ID%%;*}"
+
+  FINAL_ID=$(sbatch --parsable --dependency="afterok:$ARRAY_ID" \
+    --export="ALL,EXPERIMENT=$EXPERIMENT,RUN_ROOT=$RUN_ROOT,H4_REFERENCE=0.80" \
+    --time=02:00:00 --mem=8G --cpus-per-task=1 \
+    --output="$RUN_ROOT/logs/final_%j.out" \
+    --error="$RUN_ROOT/logs/final_%j.err" \
+    "$SCRIPT_PATH" finalize) || exit 1
+  FINAL_ID="${FINAL_ID%%;*}"
+
+  echo "Submitted 50 circ_eQTL SuSiE/coloc array tasks (array job $ARRAY_ID; concurrency cap 50)."
+  echo "Final aggregation job: $FINAL_ID (runs only after all 50 tasks succeed)."
+  echo "Run directory: $RUN_ROOT"
+  echo "Each worker receives the same candidate trait count split into 50 equal chunks."
+  exit 0
+fi
+
+if [[ "$MODE" == "finalize" ]]; then
+  module --force purge
+  module load R
+  export BASE RUN_ROOT H4_REFERENCE
+  Rscript --vanilla - <<'RS'
+suppressPackageStartupMessages({library(data.table); library(ggplot2)})
+BASE<-Sys.getenv("BASE"); RUN_ROOT<-Sys.getenv("RUN_ROOT")
+H4REF<-as.numeric(Sys.getenv("H4_REFERENCE","0.80"))
+files<-file.path(RUN_ROOT,"task_summaries",sprintf("task_%02d.tsv",0:49))
+missing<-files[!file.exists(files)]
+if(length(missing)) stop("Missing task summaries: ",paste(basename(missing),collapse=", "))
+res<-rbindlist(lapply(files,fread),fill=TRUE,use.names=TRUE)
+if(nrow(res)&&anyDuplicated(res[,.(tissue,circ_id)])) stop("Duplicate tissue/circRNA results across tasks")
+if(!"max_PP_H4"%in%names(res)) res[,max_PP_H4:=NA_real_]
+if(!"best_ALS_global_FDR"%in%names(res)) res[,best_ALS_global_FDR:=NA_real_]
+
+dir.create(file.path(BASE,"MR"),recursive=TRUE,showWarnings=FALSE)
+outfile<-file.path(BASE,"MR","circ_eQTL_SuSiE_coloc_summary.tsv")
+fwrite(res,outfile,sep="\t")
+
+# ==============================================================
+# STATUS COUNTS
+# ==============================================================
+status_counts<-if(nrow(res)){
+  z<-copy(res)
+  z[,status_group:=ifelse(grepl("^ERROR:",status),"ERROR",status)]
+  z[,.(n_loci=.N),by=.(status=status_group)][order(-n_loci)]
+} else data.table(status=character(),n_loci=integer())
+
+if(nrow(status_counts)) status_counts[,percent:=round(100*n_loci/sum(n_loci),2)] else status_counts[,percent:=numeric()]
+
+statusfile<-file.path(BASE,"MR","circ_eQTL_SuSiE_coloc_status_counts.tsv")
+fwrite(status_counts,statusfile,sep="\t")
+
+# ==============================================================
+# PP.H4 VALUES + HISTOGRAM
+# ==============================================================
+h4<-if(nrow(res)){
+  res[is.finite(max_PP_H4),.(tissue,circ_id,host_gene,max_PP_H4,n_candidate_SNPs,best_candidate_SNP,best_ALS_p,best_ALS_global_FDR)]
+} else data.table()
+
+h4file<-file.path(BASE,"MR","circ_eQTL_PPH4_values.tsv")
+plotfile<-file.path(BASE,"MR","circ_eQTL_PPH4_histogram.png")
+fwrite(h4,h4file,sep="\t")
+
+if(nrow(h4)){
+  p<-ggplot(h4,aes(x=max_PP_H4))+
+    geom_histogram(binwidth=.05,boundary=0,closed="left")+
+    geom_vline(xintercept=H4REF,linetype="dashed",linewidth=.8)+
+    scale_x_continuous(limits=c(0,1),breaks=seq(0,1,.1))+
+    labs(
+      title=paste0("circRNA eQTL SuSiE colocalization PP.H4 distribution (n=",nrow(h4),")"),
+      subtitle=paste0("Dashed line = ",H4REF," reference threshold"),
+      x="Maximum PP.H4 per circRNA-tissue locus",
+      y="Number of loci"
+    )+
+    theme_bw(base_size=12)
+
+  ggsave(filename=plotfile,plot=p,width=8,height=5,dpi=300)
+
+  cat(
+    "\nPP.H4 DISTRIBUTION\n",
+    "n = ",nrow(h4),
+    "\nmedian = ",median(h4$max_PP_H4),
+    "\nIQR = ",quantile(h4$max_PP_H4,.25)," to ",quantile(h4$max_PP_H4,.75),
+    "\n>=0.50 = ",sum(h4$max_PP_H4>=.50),
+    "\n>=0.80 = ",sum(h4$max_PP_H4>=.80),
+    "\nValues: ",h4file,
+    "\nHistogram: ",plotfile,"\n",
+    sep=""
+  )
+} else {
+  cat("\nNo finite PP.H4 values; histogram not generated.\n")
+}
+
+cat("\n",strrep("=",70),"\nSTATUS COUNTS\n",strrep("=",70),"\n",sep="")
+print(status_counts)
+
+cat("\n",strrep("=",70),"\ncircRNA eQTL SuSiE / COLOC SUMMARY\n",strrep("=",70),"\n",sep="")
+print(res)
+
+cat(
+  "\nMain summary: ",outfile,
+  "\nStatus counts: ",statusfile,
+  "\nPP.H4 values: ",h4file,"\n",
+  sep=""
+)
+
+if(nrow(h4)) cat("Histogram: ",plotfile,"\n",sep="")
+RS
+  echo "Final aggregation complete. Results are under $BASE/MR."
+  exit 0
+fi
+
+[[ "$MODE" == "worker" ]] || { echo "ERROR: expected submit, worker, or finalize mode" >&2; exit 2; }
+[[ -n "${SLURM_ARRAY_TASK_ID:-}" && -n "${RUN_ROOT:-}" ]] || { echo "ERROR: worker requires array task ID and RUN_ROOT" >&2; exit 2; }
+export RUN_ROOT
 module --force purge
 module load PLINK/1.9b_7.11-x86_64
 module load R
@@ -33,6 +171,8 @@ export BASE BFILE RAW GWAS GWAS_ORIG H4_REFERENCE MIN_SHARED_SNPS MIN_SHARED_FRA
 Rscript --vanilla - <<'RS'
 suppressPackageStartupMessages({library(data.table); library(susieR); library(coloc); library(ggplot2)})
 
+RUN_ROOT<-Sys.getenv("RUN_ROOT"); TASK_ID<-as.integer(Sys.getenv("SLURM_ARRAY_TASK_ID"))
+if(is.na(TASK_ID)||TASK_ID<0L||TASK_ID>49L) stop("Invalid array task ID")
 BASE<-Sys.getenv("BASE"); BFILE<-Sys.getenv("BFILE"); RAW<-Sys.getenv("RAW"); GWAS<-Sys.getenv("GWAS"); GWAS_ORIG<-Sys.getenv("GWAS_ORIG")
 TISSUES<-strsplit(Sys.getenv("TISSUE_LIST")," ")[[1]]; H4REF<-as.numeric(Sys.getenv("H4_REFERENCE"))
 MINSHARED<-as.integer(Sys.getenv("MIN_SHARED_SNPS")); MINFRAC<-as.numeric(Sys.getenv("MIN_SHARED_FRAC")); L<-as.integer(Sys.getenv("SUSIE_L")); MINF<-as.numeric(Sys.getenv("MIN_F"))
@@ -74,7 +214,7 @@ master<-list()
 for(tissue in TISSUES){
   mrdir<-file.path(BASE,tissue,"MR")
   snpfile<-file.path(mrdir,"circ_eQTL_MR",paste0(tissue,"_circ_eQTL_SNP_results.tsv.gz"))
-  outroot<-file.path(mrdir,"circ_eQTL_SuSiE_coloc")
+  outroot<-file.path(RUN_ROOT,"task_outputs",sprintf("task_%02d",TASK_ID),tissue)
 
   eqtldir<-file.path(BASE,tissue,"circ_eQTL"); resultdir<-file.path(eqtldir,"results")
   fullfile<-file.path(resultdir,paste0(tissue,"_eQTL.full_annotated.txt"))
@@ -83,7 +223,7 @@ for(tissue in TISSUES){
   annfile<-file.path(eqtldir,"circ_annotation.tsv")
   exprfile<-file.path(eqtldir,paste0("expression_",tissue,".txt"))
   for(f in c(snpfile,fullfile,annfile,exprfile,genefile,locfile,covfile)) if(!file.exists(f)||file.info(f)$size==0) stop("Missing/empty: ",f)
-  if(dir.exists(outroot)) unlink(outroot,recursive=TRUE,force=TRUE); dir.create(outroot,recursive=TRUE,showWarnings=FALSE)
+  dir.create(outroot,recursive=TRUE,showWarnings=FALSE)
 
   # ============================================================
   # UNIQUE SNP CANDIDATES FROM CURRENT SNP-FIRST ANALYSIS
@@ -144,7 +284,6 @@ for(tissue in TISSUES){
              is.finite(eqtl_FDR)&eqtl_FDR<=.05 &
              is.finite(F_statistic)&F_statistic>=MINF,
              .(circ_id,gene_symbol,snpid,beta_qtl,t_qtl,p_qtl,eqtl_FDR,F_statistic)]
-  fwrite(cand[,.(circ_id,gene_symbol,snpid)],file.path(outroot,"candidate_circ_mapping.tsv"),sep="\t")
   if(!nrow(cand)){cat(tissue,": no circRNA associations pass candidate filters\n"); next}
 
   cand<-unique(cand,by=c("circ_id","snpid"))
@@ -167,7 +306,24 @@ for(tissue in TISSUES){
 
   gene_meta[!is.finite(best_ALS_tissue_FDR),best_ALS_tissue_FDR:=NA_real_]
   gene_meta[!is.finite(best_ALS_global_FDR),best_ALS_global_FDR:=NA_real_]
+  # Equal trait counts (+/- one), with candidate-SNP counts used to spread workload.
+  setorder(gene_meta,-n_candidate_SNPs,circ_id)
+  assignment<-integer(nrow(gene_meta)); task_load<-numeric(50); task_count<-integer(50)
+  for(i in seq_len(nrow(gene_meta))){
+    eligible<-which(task_count==min(task_count))
+    k<-eligible[which.min(task_load[eligible])]
+    assignment[i]<-k-1L
+    task_count[k]<-task_count[k]+1L
+    task_load[k]<-task_load[k]+gene_meta$n_candidate_SNPs[i]
+  }
+  gene_meta[,array_task:=assignment]
+  fwrite(gene_meta[,.(circ_id,array_task,n_candidate_SNPs)],file.path(outroot,"chunk_assignments.tsv"),sep="\t")
+  gene_meta<-gene_meta[array_task==TASK_ID]
   genes<-gene_meta$circ_id
+  cand<-cand[circ_id%in%genes]
+  fwrite(cand[,.(circ_id,gene_symbol,snpid)],file.path(outroot,"candidate_circ_mapping.tsv"),sep="\t")
+  cat("Array task",TASK_ID,"of 50:",length(genes),"traits; candidate-SNP weight",task_load[TASK_ID+1L],"\n")
+  if(!length(genes)){rm(full,gloc,ann,cand,gene_meta); gc(); next}
 
   cat("\n",strrep("=",70),"\n",tissue,": ",
       nrow(cand_snps)," unique candidate SNPs → ",
@@ -433,97 +589,16 @@ for(tissue in TISSUES){
   rm(full,gloc,ann,cand,gene_meta,phenotype_sd); gc()
 }
 
-# ==============================================================
-# MAIN SUMMARY
-# ==============================================================
-res<-if(length(master)) rbindlist(master,fill=TRUE) else data.table()
-if(!"max_PP_H4"%in%names(res)) res[,max_PP_H4:=NA_real_]
-if(!"best_ALS_global_FDR"%in%names(res)) res[,best_ALS_global_FDR:=NA_real_]
-
-dir.create(file.path(BASE,"MR"),recursive=TRUE,showWarnings=FALSE)
-outfile<-file.path(BASE,"MR","circ_eQTL_SuSiE_coloc_summary.tsv")
-fwrite(res,outfile,sep="\t")
-
-# ==============================================================
-# STATUS COUNTS
-# ==============================================================
-status_counts<-if(nrow(res)){
-  z<-copy(res)
-  z[,status_group:=ifelse(grepl("^ERROR:",status),"ERROR",status)]
-  z[,.(n_loci=.N),by=.(status=status_group)][order(-n_loci)]
-} else data.table(status=character(),n_loci=integer())
-
-if(nrow(status_counts)) status_counts[,percent:=round(100*n_loci/sum(n_loci),2)] else status_counts[,percent:=numeric()]
-
-statusfile<-file.path(BASE,"MR","circ_eQTL_SuSiE_coloc_status_counts.tsv")
-fwrite(status_counts,statusfile,sep="\t")
-
-# ==============================================================
-# PP.H4 VALUES + HISTOGRAM
-# ==============================================================
-h4<-if(nrow(res)){
-  res[is.finite(max_PP_H4),.(tissue,circ_id,host_gene,max_PP_H4,n_candidate_SNPs,best_candidate_SNP,best_ALS_p,best_ALS_global_FDR)]
-} else data.table()
-
-h4file<-file.path(BASE,"MR","circ_eQTL_PPH4_values.tsv")
-plotfile<-file.path(BASE,"MR","circ_eQTL_PPH4_histogram.png")
-fwrite(h4,h4file,sep="\t")
-
-if(nrow(h4)){
-  p<-ggplot(h4,aes(x=max_PP_H4))+
-    geom_histogram(binwidth=.05,boundary=0,closed="left")+
-    geom_vline(xintercept=H4REF,linetype="dashed",linewidth=.8)+
-    scale_x_continuous(limits=c(0,1),breaks=seq(0,1,.1))+
-    labs(
-      title=paste0("circRNA eQTL SuSiE colocalization PP.H4 distribution (n=",nrow(h4),")"),
-      subtitle=paste0("Dashed line = ",H4REF," reference threshold"),
-      x="Maximum PP.H4 per circRNA-tissue locus",
-      y="Number of loci"
-    )+
-    theme_bw(base_size=12)
-
-  ggsave(filename=plotfile,plot=p,width=8,height=5,dpi=300)
-
-  cat(
-    "\nPP.H4 DISTRIBUTION\n",
-    "n = ",nrow(h4),
-    "\nmedian = ",median(h4$max_PP_H4),
-    "\nIQR = ",quantile(h4$max_PP_H4,.25)," to ",quantile(h4$max_PP_H4,.75),
-    "\n>=0.50 = ",sum(h4$max_PP_H4>=.50),
-    "\n>=0.80 = ",sum(h4$max_PP_H4>=.80),
-    "\nValues: ",h4file,
-    "\nHistogram: ",plotfile,"\n",
-    sep=""
-  )
-} else {
-  cat("\nNo finite PP.H4 values; histogram not generated.\n")
-}
-
-cat("\n",strrep("=",70),"\nSTATUS COUNTS\n",strrep("=",70),"\n",sep="")
-print(status_counts)
-
-cat("\n",strrep("=",70),"\ncircRNA eQTL SuSiE / COLOC SUMMARY\n",strrep("=",70),"\n",sep="")
-print(res)
-
-cat(
-  "\nMain summary: ",outfile,
-  "\nStatus counts: ",statusfile,
-  "\nPP.H4 values: ",h4file,"\n",
-  sep=""
-)
-
-if(nrow(h4)) cat("Histogram: ",plotfile,"\n",sep="")
+res<-if(length(master)) rbindlist(master,fill=TRUE) else data.table(
+  tissue=character(),circ_id=character(),host_gene=character(),status=character(),
+  n_locus=integer(),n_shared=integer(),shared_fraction=numeric(),
+  n_candidate_SNPs=integer(),best_candidate_SNP=character(),best_ALS_p=numeric(),
+  best_ALS_global_FDR=numeric(),max_PP_H4=numeric())
+summarydir<-file.path(RUN_ROOT,"task_summaries")
+dir.create(summarydir,recursive=TRUE,showWarnings=FALSE)
+taskfile<-file.path(summarydir,sprintf("task_%02d.tsv",TASK_ID))
+fwrite(res,taskfile,sep="\t")
+cat("Task",TASK_ID,"complete:",nrow(res),"trait results written to",taskfile,"\n")
 RS
 
-echo
-echo "circRNA eQTL SuSiE + colocalization complete."
-echo
-echo "=== STATUS COUNTS ==="
-column -t -s $'\t' "$BASE/MR/circ_eQTL_SuSiE_coloc_status_counts.tsv"
-
-echo
-echo "=== OUTPUT FILES ==="
-echo "$BASE/MR/circ_eQTL_SuSiE_coloc_summary.tsv"
-echo "$BASE/MR/circ_eQTL_SuSiE_coloc_status_counts.tsv"
-echo "$BASE/MR/circ_eQTL_PPH4_values.tsv"
-echo "$BASE/MR/circ_eQTL_PPH4_histogram.png"
+echo "circRNA eQTL SuSiE/coloc task ${SLURM_ARRAY_TASK_ID} complete; run directory: $RUN_ROOT"
