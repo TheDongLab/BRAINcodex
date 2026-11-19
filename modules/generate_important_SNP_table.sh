@@ -691,7 +691,7 @@ pd.DataFrame(manifest_rows, columns=manifest_columns).drop_duplicates(['SNP', 't
 print(f"Manifest: {OUTDIR / 'HIGH_MEDIUM_plot_manifest.tsv'}", flush=True)
 
 def write_trait_summary(pairs, evidence, destination):
-    fields = ['gene', 'qtl_types', 'tissues', 'n_unique_significant_SNPs', 'n_HIGH_MEDIUM_SNPs', 'n_traits', 'eQTL_traits', 'sQTL_traits', 'cQTL_traits', 'circ_eQTL_traits', 'HIGH_MEDIUM_SNPs', 'SNP_trait_associations', 'lead_SNP', 'lead_priority', 'lead_evidence_count', 'lead_GWAS_p', 'lead_reason', 'HIGH_MEDIUM_SNP_evidence', 'all_significant_SNPs'] + ['n_SNPs_with_' + c for c in score_cols]
+    fields = ['gene', 'qtl_types', 'tissues', 'n_unique_significant_SNPs', 'n_HIGH_MEDIUM_SNPs', 'n_traits', 'eQTL_traits', 'sQTL_traits', 'cQTL_traits', 'circ_eQTL_traits', 'HIGH_MEDIUM_SNPs', 'SNP_trait_associations', 'lead_SNP', 'lead_evidence_count', 'lead_GWAS_p', 'lead_reason', 'HIGH_MEDIUM_SNP_evidence', 'all_significant_SNPs'] + ['n_SNPs_with_' + c for c in score_cols]
     expanded = []
     for pair in pairs:
         genes = [g for g in pair['gene_symbols'].split(';') if g]
@@ -719,7 +719,7 @@ def write_trait_summary(pairs, evidence, destination):
                 for ((q, trait), hit) in sub.groupby(['qtl_type', 'original_trait'], sort=True):
                     annotations.append(q + ':' + trait + ' [' + ','.join(sorted(set(hit.tissue))) + ']')
                 links.append(snp + ' => ' + ' | '.join(annotations))
-            record = dict(gene=gene, qtl_types=','.join(sorted(set(group.qtl_type))), tissues=','.join(sorted(set(group.tissue))), n_unique_significant_SNPs=len(ids), n_HIGH_MEDIUM_SNPs=len(candidates), n_traits=len(group[['qtl_type', 'trait']].drop_duplicates()), HIGH_MEDIUM_SNPs=','.join(example_ids), SNP_trait_associations='; '.join(links), lead_SNP=lead.SNP, lead_priority=lead.validation_priority, lead_evidence_count=int(lead.evidence_count), lead_GWAS_p=lead.GWAS_p, lead_reason=str(lead.validation_priority) + '; ' + str(int(lead.evidence_count)) + ' evidence points; GWAS p=' + str(lead.GWAS_p) + '; ' + describe_snp_evidence(lead.evidence_categories), HIGH_MEDIUM_SNP_evidence='; '.join((str(row.SNP) + ' => ' + describe_snp_evidence(row.evidence_categories) for row in candidates.itertuples())), all_significant_SNPs=','.join(ids))
+            record = dict(gene=gene, qtl_types=','.join(sorted(set(group.qtl_type))), tissues=','.join(sorted(set(group.tissue))), n_unique_significant_SNPs=len(ids), n_HIGH_MEDIUM_SNPs=len(candidates), n_traits=len(group[['qtl_type', 'trait']].drop_duplicates()), HIGH_MEDIUM_SNPs=','.join(example_ids), SNP_trait_associations='; '.join(links), lead_SNP=lead.SNP, lead_evidence_count=int(lead.evidence_count), lead_GWAS_p=lead.GWAS_p, lead_reason='GWAS p=' + str(lead.GWAS_p) + '; ' + describe_snp_evidence(lead.evidence_categories), HIGH_MEDIUM_SNP_evidence='; '.join((str(row.SNP) + ' => ' + describe_snp_evidence(row.evidence_categories) for row in candidates.itertuples())), all_significant_SNPs=','.join(ids))
             for q in QTLS:
                 record[q + '_traits'] = ','.join(sorted(set(group.loc[group.qtl_type == q, 'original_trait'])))
             for c in score_cols:
@@ -727,11 +727,11 @@ def write_trait_summary(pairs, evidence, destination):
             results.append(record)
     result = pd.DataFrame(results, columns=fields)
     if not result.empty:
-        result['_priority'] = result.lead_priority.map({'HIGH': 0, 'MEDIUM': 1})
+        result['_priority'] = result.lead_SNP.map(evidence['validation_priority']).map({'HIGH': 0, 'MEDIUM': 1})
         result = result.sort_values(['_priority', 'lead_evidence_count', 'lead_GWAS_p', 'gene'], ascending=[True, False, True, True], na_position='last').drop(columns='_priority')
     result.to_csv(destination, sep='\t', index=False, na_rep='NA')
     print(f'Gene summary: {destination} ({len(result)} rows)', flush=True)
-write_trait_summary(trait_pairs, snp_records, OUTDIR / 'HIGH_MEDIUM_gene_summary.tsv')
+write_trait_summary(trait_pairs, snp_records, OUTDIR / 'gene_focused_interesting_SNPs_from_QTL.tsv')
 print()
 print('=' * 72)
 print('DONE')
