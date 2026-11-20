@@ -3,8 +3,8 @@
 #SBATCH --time=12:00:00
 #SBATCH --mem=8G
 #SBATCH --cpus-per-task=1
-#SBATCH --output=unc13a_stmn2.out
-#SBATCH --error=unc13a_stmn2.err
+#SBATCH --output=/home/zw529/donglab/data/target_ALS/QTL/unc13a_stmn2.out
+#SBATCH --error=/home/zw529/donglab/data/target_ALS/QTL/unc13a_stmn2.err
 set -euo pipefail
 
 # Override these variables at submission if needed: sbatch --export=ALL,OUTDIR=/path ...
