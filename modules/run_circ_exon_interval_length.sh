@@ -13,7 +13,7 @@ export PYTHONNOUSERSITE=1
 module load deepTools
 export TARGET_ROOT="${TARGET_ROOT:-$HOME/donglab/data/target_ALS}"
 export ANSWER_ROOT="${ANSWER_ROOT:-$HOME/donglab/data/answer_ALS}"
-export OUTDIR="${OUTDIR:-$TARGET_ROOT/QTL/circ_splicing_comparison_v2}"
+export OUTDIR="${OUTDIR:-$TARGET_ROOT/QTL/circ_splicing_comparison}"
 export GTF="${GTF:-$HOME/donglab/references/genome/Homo_sapiens/UCSC/hg38/Annotation/gencode/gencode.v49.annotation.gtf}"
 export MIN_CIRC_READS="${MIN_CIRC_READS:-2}"
 export MIN_JUNCTION_READS="${MIN_JUNCTION_READS:-10}"
