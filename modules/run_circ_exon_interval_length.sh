@@ -169,7 +169,14 @@ for dataset,tissue in sorted({(r['dataset'],r['tissue']) for r in rows}):
   for ax,gene in zip(axes,['unc13a','stmn2']):
     fractions=[float(r[gene+'_cryptic_fraction']) for r in tissue_rows if r.get(gene+'_cryptic_fraction','')!='']
     if fractions:
-      ax.hist([v*100 for v in fractions],bins=[0,1,5,10,25,50,75,100.00001],color='#426d89',edgecolor='white')
+      # Zero is a discrete category; positive fractions use explicit unequal-width bins.
+      bins=[0,0.1,0.5,1,5,10,25,50,75,100]
+      labels=['0','>0–0.1','>0.1–0.5','>0.5–1','>1–5','>5–10','>10–25','>25–50','>50–75','>75–100']
+      counts=[sum(v==0 for v in fractions)]
+      percentages=[v*100 for v in fractions if v>0]
+      counts.extend(sum(lo < v <= hi for v in percentages) for lo,hi in zip(bins[:-1],bins[1:]))
+      ax.bar(range(len(labels)),counts,color=['#c44e52']+['#426d89']*(len(labels)-1),edgecolor='white')
+      ax.set_xticks(range(len(labels)));ax.set_xticklabels(labels,rotation=45,ha='right',fontsize=8)
       ax.set_xlabel('Cryptic junction fraction (%)');ax.set_ylabel('Samples'); ax.set_title(gene.upper()+f' | n={len(fractions)}')
     else:
       ax.axis('off');ax.text(.5,.5,'No samples with sufficient junction coverage',ha='center',va='center',wrap=True,transform=ax.transAxes);ax.set_title(gene.upper()+' | n=0')
@@ -196,9 +203,13 @@ for dataset,tissue in sorted({(r['dataset'],r['tissue']) for r in rows}):
         ax.hist([zero,positive],bins=bins,stacked=True,color=['#a9b9c5','#d78758'],label=[f'No cryptic reads (n={len(zero)})',f'Cryptic reads detected (n={len(positive)})'],edgecolor='white')
         cryptic_counts=[(int(r['unc13a_128_reads'])+int(r['unc13a_178_reads']) if gene=='unc13a' else int(r['stmn2_cryptic_reads'])) for r in matched]
         detected_counts=[v for v in cryptic_counts if v>0]
+        canonical_counts=[int(r['unc13a_skip_reads'] if gene=='unc13a' else r['stmn2_canonical_reads']) for r in matched]
+        canonical_detected=[v for v,c in zip(canonical_counts,cryptic_counts) if c>0]
         mean_all=statistics.mean(cryptic_counts)
         mean_detected=f'{statistics.mean(detected_counts):.2f}' if detected_counts else 'NA'
-        ax.text(.98,.77,f'Mean cryptic reads: {mean_all:.2f} per sample\nAmong detected: {mean_detected}',transform=ax.transAxes,ha='right',va='top',fontsize=7,color='#444444',bbox=dict(facecolor='white',alpha=.8,edgecolor='none'))
+        mean_canonical=statistics.mean(canonical_counts)
+        mean_canonical_detected=f'{statistics.mean(canonical_detected):.2f}' if canonical_detected else 'NA'
+        ax.text(.98,.77,f'Mean reads / sample: cryptic {mean_all:.2f}, canonical {mean_canonical:.2f}\nAmong cryptic-detected: {mean_detected}, {mean_canonical_detected}',transform=ax.transAxes,ha='right',va='top',fontsize=7,color='#444444',bbox=dict(facecolor='white',alpha=.8,edgecolor='none'))
         ax.set_xlabel(label);ax.set_ylabel('Samples');ax.legend(fontsize=7,frameon=False)
     fig.suptitle(dataset+' | '+tissue+' — sample distributions');fig.savefig(out/f'{dataset}_{tissue}_{tag}_histogram.png',dpi=170);plt.close(fig)
 write('correlations.tsv',stats,['dataset','tissue','gene','subset','metric','n','spearman_rho','p_value'])
