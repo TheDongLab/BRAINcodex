@@ -3,16 +3,15 @@
 #SBATCH --time=12:00:00
 #SBATCH --mem=8G
 #SBATCH --cpus-per-task=1
-#SBATCH --output=/home/zw529/donglab/data/target_ALS/QTL/unc13a_stmn2.out
-#SBATCH --error=/home/zw529/donglab/data/target_ALS/QTL/unc13a_stmn2.err
-
+#SBATCH --output=/home/zw529/donglab/data/target_ALS/QTL/unc13a_stmn2_%j.out
+#SBATCH --error=/home/zw529/donglab/data/target_ALS/QTL/unc13a_stmn2_%j.err
 set -euo pipefail
-module load R
 
 # Override these variables at submission if needed: sbatch --export=ALL,OUTDIR=/path ...
 export TARGET_ROOT="${TARGET_ROOT:-$HOME/donglab/data/target_ALS}"
 export ANSWER_ROOT="${ANSWER_ROOT:-$HOME/donglab/data/answer_ALS}"
-export OUTDIR="${OUTDIR:-$HOME/donglab/data/target_ALS/QTL/UNC13A_STMN2}"
+# Results (tables and PDF) are written here; logs are written to QTL above.
+export OUTDIR="${OUTDIR:-/home/zw529/donglab/data/target_ALS/QTL/UNC13A_STMN2}"
 mkdir -p "$OUTDIR"
 command -v Rscript >/dev/null || { echo 'ERROR: Rscript is required for plots; load your cluster R module before submitting.' >&2; exit 1; }
 python3 - <<'PY'
@@ -23,10 +22,10 @@ from collections import Counter, defaultdict
 out=Path(os.environ['OUTDIR']); out.mkdir(parents=True,exist_ok=True)
 roots={'targetALS':Path(os.environ['TARGET_ROOT']), 'answerALS':Path(os.environ['ANSWER_ROOT'])}
 remap={}
-for x in ['Motor Cortex Lateral','Motor Cortex Medial','Lateral Motor Cortex','Medial Motor Cortex','Primary Motor Cortex L','Primary Motor Cortex M','Cortex_Motor_Unspecified','Cortex_Motor_BA4','BA4 Motor Cortex','Lateral_motor_cortex','Motor_Cortex_Lateral','Motor_Cortex_Medial','Lateral_Motor_Cortex','Medial_Motor_Cortex','Primary_Motor_Cortex_L','Primary_Motor_Cortex_M']: remap[x]='Motor_Cortex'
-for x in ['Spinal_Cord_Cervical','Cervical Spinal Cord','Cervical_spinal_cord','Spinal_cord_Cervical']: remap[x]='Cervical_Spinal_Cord'
-for x in ['Lumbar Spinal Cord','Spinal_Cord_Lumbosacral','Lumbosacral_Spinal_Cord','Lumbar_spinal_cord']: remap[x]='Lumbar_Spinal_Cord'
-remap.update({'Frontal Cortex':'Frontal_Cortex','Cerebellum':'Cerebellum'})
+for x in ['Motor Cortex Lateral','Motor Cortex Medial','Lateral Motor Cortex','Medial Motor Cortex','Primary Motor Cortex L','Primary Motor Cortex M','Cortex_Motor_Unspecified','Cortex_Motor_BA4','BA4 Motor Cortex','Lateral_motor_cortex','Motor_Cortex_Lateral','Motor_Cortex_Medial','Lateral_Motor_Cortex','Medial_Motor_Cortex','Primary_Motor_Cortex_L','Primary_Motor_Cortex_M','Motor_Cortex']: remap[x]='Motor_Cortex'
+for x in ['Spinal_Cord_Cervical','Cervical Spinal Cord','Cervical_spinal_cord','Spinal_cord_Cervical','Cervical_Spinal_Cord']: remap[x]='Cervical_Spinal_Cord'
+for x in ['Lumbar Spinal Cord','Spinal_Cord_Lumbosacral','Lumbosacral_Spinal_Cord','Lumbar_spinal_cord','Lumbar_Spinal_Cord']: remap[x]='Lumbar_Spinal_Cord'
+remap.update({'Frontal Cortex':'Frontal_Cortex','Frontal_Cortex':'Frontal_Cortex','Cerebellum':'Cerebellum'})
 # LeafCutter .junc is BED-like: start is zero-based, end is exclusive. The observed PSI equivalent of .junc 17642591-17642844 is 17642591-17642845.
 # Exact junctions, not +/- 1 matches. Shared boundary supports either isoform.
 events={'shared':(17641556,17642413),'exon_128':(17642541,17642844),'exon_178':(17642591,17642844),'skipping':(17641556,17642844),'stmn2_cryptic':(79611214,79616821),'stmn2_canonical':(79611214,79636801)}
@@ -34,7 +33,10 @@ rows=[]; matches=[]; issues=[]
 for dataset,root in roots.items():
     if not root.is_dir(): issues.append([dataset,str(root),'dataset root missing']); continue
     for processed in sorted(root.glob('*/RNAseq/Processed')):
-        tissue=processed.parent.parent.name; mapped=remap.get(tissue,tissue)
+        tissue=processed.parent.parent.name
+        if dataset=='targetALS' and tissue not in remap: continue
+        if dataset=='answerALS' and tissue!='iPSC_Motor_Neuron': continue
+        mapped=remap.get(tissue,tissue)
         for sd in sorted(x for x in processed.iterdir() if x.is_dir()):
             base={'dataset':dataset,'tissue':mapped,'original_tissue':tissue,'sample':sd.name}
             paths=sorted((sd/'leafcutter'/'juncs').glob('*.junc'))
@@ -48,14 +50,16 @@ for dataset,root in roots.items():
                     with paths[0].open() as f:
                         for line in f:
                             a=line.split()
-                            if len(a)<6 or (a[0],a[5]) not in [('chr19','-'),('chr8','+')]: continue
+                            if len(a)<6: continue
+                            chrom=a[0][3:] if a[0].lower().startswith('chr') else a[0]
+                            if (chrom,a[5]) not in [('19','-'),('8','+')]: continue
                             try: start,end,reads=int(a[1]),int(a[2]),int(a[4])
                             except ValueError: bad+=1; continue
                             # Preserve all nearby endpoint hits for convention auditing.
-                            if (a[0]=='chr19' and any(abs(x-y)<=1 for x in (start,end) for y in (17642414,17642541,17642591))) or (a[0]=='chr8' and any(abs(x-y)<=1 for x in (start,end) for y in (79616822,79636802))):
+                            if (chrom=='19' and any(abs(x-y)<=1 for x in (start,end) for y in (17642414,17642541,17642591))) or (chrom=='8' and any(abs(x-y)<=1 for x in (start,end) for y in (79616822,79636802))):
                                 matches.append([dataset,mapped,tissue,sd.name,a[0],a[5],start,end,reads,str(paths[0])])
                             for k,coord in events.items():
-                                if (start,end)==coord and ((k.startswith('stmn2_') and a[0]=='chr8') or (not k.startswith('stmn2_') and a[0]=='chr19')): sums[k]+=reads
+                                if (start,end)==coord and ((k.startswith('stmn2_') and chrom=='8') or (not k.startswith('stmn2_') and chrom=='19')): sums[k]+=reads
                     row['junc_status']='ok' if not bad else 'ok_with_malformed_chr19_rows'
                     for k in events: row[k+'_reads']=sums[k]
                 except (OSError,UnicodeError) as e:
@@ -110,8 +114,8 @@ for (i in seq_len(nrow(groups))) {
    test <- suppressWarnings(cor.test(x,y,method='spearman',exact=FALSE)); rho <- unname(test$estimate); p <- test$p.value; status <- 'ok'
   }
   stats[[length(stats)+1]] <- data.frame(dataset=groups$dataset[i],tissue=groups$tissue[i],metric=v,n=length(x),rho=rho,p_value=p,status=status)
-  plot(x,y,xlim=c(0,1),ylim=c(0,1),pch=16,col=adjustcolor('steelblue4',alpha.f=.45),xlab='STMN2 cryptic / (cryptic + canonical)',ylab='UNC13A junction usage',main=paste(v,'n =',length(x)),cex.main=.85)
-  if (!is.na(rho)) mtext(sprintf('Spearman rho = %.3f; p = %.3g',rho,p),side=3,line=.2,cex=.75)
+  plot(x,y,xlim=c(0,1),ylim=c(0,1),pch=16,col=adjustcolor('steelblue4',alpha.f=.45),xlab='STMN2 cryptic / (cryptic + canonical)',ylab='UNC13A junction usage',main=sub('unc13a_', 'UNC13A ', sub('_usage$', '', v)),cex.main=1.15)
+  if (!is.na(rho)) { abline(lm(y ~ x), col='firebrick', lwd=1.5); legend('topright', legend=sprintf('Spearman rho = %.3f\nn = %d',rho,length(x)), bty='n', cex=.72) } else legend('topright', legend=paste('n =',length(x),'\nrho unavailable'), bty='n', cex=.72)
  }
  mtext(paste(groups$dataset[i],groups$tissue[i]),outer=TRUE,side=3,line=.5)
 }
