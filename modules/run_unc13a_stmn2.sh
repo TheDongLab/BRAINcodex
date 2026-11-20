@@ -5,7 +5,9 @@
 #SBATCH --cpus-per-task=1
 #SBATCH --output=/home/zw529/donglab/data/target_ALS/QTL/unc13a_stmn2_%j.out
 #SBATCH --error=/home/zw529/donglab/data/target_ALS/QTL/unc13a_stmn2_%j.err
+
 set -euo pipefail
+module load R
 
 # Override these variables at submission if needed: sbatch --export=ALL,OUTDIR=/path ...
 export TARGET_ROOT="${TARGET_ROOT:-$HOME/donglab/data/target_ALS}"
