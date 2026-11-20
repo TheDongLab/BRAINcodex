@@ -5,13 +5,16 @@
 #SBATCH --cpus-per-task=1
 #SBATCH --output=/home/zw529/donglab/data/target_ALS/QTL/unc13a_stmn2.out
 #SBATCH --error=/home/zw529/donglab/data/target_ALS/QTL/unc13a_stmn2.err
+
 set -euo pipefail
+module load R
 
 # Override these variables at submission if needed: sbatch --export=ALL,OUTDIR=/path ...
 export TARGET_ROOT="${TARGET_ROOT:-$HOME/donglab/data/target_ALS}"
 export ANSWER_ROOT="${ANSWER_ROOT:-$HOME/donglab/data/answer_ALS}"
 export OUTDIR="${OUTDIR:-$HOME/donglab/data/target_ALS/QTL/UNC13A_STMN2}"
 mkdir -p "$OUTDIR"
+command -v Rscript >/dev/null || { echo 'ERROR: Rscript is required for plots; load your cluster R module before submitting.' >&2; exit 1; }
 python3 - <<'PY'
 import csv, os, sys, math, statistics
 from pathlib import Path
@@ -78,43 +81,40 @@ for (dataset,tissue),rr in sorted(groups.items()):
     for k in events: d[k+'_positive']=sum(int(r[k+'_reads'])>0 for r in ok)
     summary.append(d)
 write('tissue_summary.tsv',['dataset','tissue','samples','junc_readable','paired']+[k+'_positive' for k in events],summary)
-# Compare junction reads within tissue, retaining zero counts from readable files.
-try:
-    from scipy.stats import spearmanr
-except ImportError: spearmanr=None
-stats=[]
-for (dataset,tissue),rr in sorted(groups.items()):
-    for k in ['shared','exon_128','exon_178']:
-        pairs=[]
-        for r in rr:
-            if not r['junc_status'].startswith('ok'): continue
-            try:
-                x=float(r['stmn2_cryptic_reads']); y=float(r[k+'_reads'])
-                if math.isfinite(x) and math.isfinite(y): pairs.append((x,y))
-            except (ValueError,TypeError): pass
-        d=dict(dataset=dataset,tissue=tissue,junction=k,n=len(pairs),positive=sum(y>0 for x,y in pairs),spearman_rho='',p_value='',status='')
-        if spearmanr is None: d['status']='scipy_unavailable'
-        elif len(pairs)<3 or len({x for x,y in pairs})<2 or len({y for x,y in pairs})<2: d['status']='insufficient_variation'
-        else:
-            z=spearmanr([x for x,y in pairs],[y for x,y in pairs]); d.update(spearman_rho=z.statistic,p_value=z.pvalue,status='ok')
-        stats.append(d)
-write('spearman_by_tissue.tsv',['dataset','tissue','junction','n','positive','spearman_rho','p_value','status'],stats)
-try:
-    import matplotlib; matplotlib.use('Agg')
-    import matplotlib.pyplot as plt
-    for (dataset,tissue),rr in sorted(groups.items()):
-        fig,axes=plt.subplots(1,3,figsize=(13,4),constrained_layout=True)
-        for ax,k in zip(axes,['shared','exon_128','exon_178']):
-            pairs=[]
-            for r in rr:
-                if not r['junc_status'].startswith('ok'): continue
-                try:
-                    x,y=float(r['stmn2_cryptic_reads']),float(r[k+'_reads'])
-                    if math.isfinite(x) and math.isfinite(y): pairs.append((x,y))
-                except (ValueError,TypeError): pass
-            ax.scatter([x for x,y in pairs],[y for x,y in pairs],s=12,alpha=.45); ax.set_title(k.replace('_',' ')+' (n='+str(len(pairs))+')'); ax.set_xlabel('STMN2 cryptic junction reads'); ax.set_ylabel('Junction reads')
-        fig.suptitle(dataset+' | '+tissue); fig.savefig(out/(dataset+'_'+tissue.replace('/','_')+'_STMN2.png'),dpi=160); plt.close(fig)
-except ImportError: print('matplotlib unavailable; plots skipped',file=sys.stderr)
 print('Output:',out,'; samples:',len(rows),'; issues:',len(issues),flush=True)
 if not rows: sys.exit('No sample directories found; check dataset roots.')
 PY
+
+Rscript - "$OUTDIR" <<'RSCRIPT'
+args <- commandArgs(trailingOnly=TRUE)
+dir <- args[1]
+d <- read.delim(file.path(dir, 'sample_junctions_STMN2.tsv'), check.names=FALSE, stringsAsFactors=FALSE, na.strings=c('', 'NA'))
+d <- d[grepl('^ok', d$junc_status), , drop=FALSE]
+ratio <- function(a,b) ifelse(!is.na(a) & !is.na(b) & a+b>0, a/(a+b), NA_real_)
+d$stmn2_usage <- ratio(d$stmn2_cryptic_reads, d$stmn2_canonical_reads)
+d$unc13a_shared_usage <- ratio(d$shared_reads, d$skipping_reads)
+den <- d$exon_128_reads + d$exon_178_reads + d$skipping_reads
+d$unc13a_128_usage <- ifelse(!is.na(den) & den>0, d$exon_128_reads/den, NA_real_)
+d$unc13a_178_usage <- ifelse(!is.na(den) & den>0, d$exon_178_reads/den, NA_real_)
+write.table(d, file.path(dir,'sample_junction_usage.tsv'), sep='\t', row.names=FALSE, quote=FALSE, na='NA')
+if (!nrow(d)) stop('No readable junction files: see issues.tsv')
+pdf(file.path(dir,'UNC13A_STMN2_junction_usage.pdf'),width=12,height=4.5)
+groups <- unique(d[c('dataset','tissue')]); stats <- list()
+for (i in seq_len(nrow(groups))) {
+ z <- d[d$dataset==groups$dataset[i] & d$tissue==groups$tissue[i],,drop=FALSE]
+ par(mfrow=c(1,3),mar=c(4.5,4.5,3,1),oma=c(0,0,2,0))
+ for (v in c('unc13a_shared_usage','unc13a_128_usage','unc13a_178_usage')) {
+  ok <- is.finite(z$stmn2_usage) & is.finite(z[[v]]); x <- z$stmn2_usage[ok]; y <- z[[v]][ok]
+  rho <- p <- NA_real_; status <- 'insufficient variation'
+  if (length(x)>=3 && length(unique(x))>1 && length(unique(y))>1) {
+   test <- suppressWarnings(cor.test(x,y,method='spearman',exact=FALSE)); rho <- unname(test$estimate); p <- test$p.value; status <- 'ok'
+  }
+  stats[[length(stats)+1]] <- data.frame(dataset=groups$dataset[i],tissue=groups$tissue[i],metric=v,n=length(x),rho=rho,p_value=p,status=status)
+  plot(x,y,xlim=c(0,1),ylim=c(0,1),pch=16,col=adjustcolor('steelblue4',alpha.f=.45),xlab='STMN2 cryptic / (cryptic + canonical)',ylab='UNC13A junction usage',main=paste(v,'n =',length(x)),cex.main=.85)
+  if (!is.na(rho)) mtext(sprintf('Spearman rho = %.3f; p = %.3g',rho,p),side=3,line=.2,cex=.75)
+ }
+ mtext(paste(groups$dataset[i],groups$tissue[i]),outer=TRUE,side=3,line=.5)
+}
+dev.off()
+write.table(do.call(rbind,stats),file.path(dir,'spearman_usage_by_tissue.tsv'),sep='\t',row.names=FALSE,quote=FALSE,na='NA')
+RSCRIPT
