@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=circ_splicing
+#SBATCH --job-name=circ_exon_bp_intervals
 #SBATCH --time=04:00:00
 #SBATCH --mem=16G
 #SBATCH --cpus-per-task=1
@@ -29,6 +29,20 @@ from scipy.stats import spearmanr
 out=Path(os.environ['OUTDIR']); out.mkdir(parents=True,exist_ok=True)
 mincirc=int(os.environ['MIN_CIRC_READS']); minj=int(os.environ['MIN_JUNCTION_READS'])
 pattern=re.compile(r'(chr[^:\s]+):(\d+)-(\d+):([+-])')
+def normalize_id(value):
+  value=str(value or '').strip()
+  chrom=r'(?:chr)?([0-9]+|X|Y|M|MT)'
+  patterns=[(rf'^{chrom}:(\d+)[-:](\d+):([+-])$',False), (rf'^{chrom}:([+-]):(\d+)-(\d+)$',True), (rf'^{chrom}:(\d+)[-:](\d+)$',False)]
+  for pat,first in patterns:
+    m=re.fullmatch(pat,value,re.I)
+    if m:
+      parts=m.groups(); c=parts[0].upper(); c='M' if c=='MT' else c
+      if first: strand,start,end=parts[1:]
+      else: start,end=parts[1:3]; strand=parts[3] if len(parts)>3 else ''
+      if int(start)>=int(end): return None
+      return f'chr{c}:{int(start)}-{int(end)}'+(':'+strand if strand else '')
+  return None
+
 roots=[('target_ALS',Path(os.environ['TARGET_ROOT'])),('answer_ALS',Path(os.environ['ANSWER_ROOT']))]
 events={'unc13a_128':('chr19',17642541,17642844,'-'),'unc13a_178':('chr19',17642591,17642844,'-'),'unc13a_skip':('chr19',17641556,17642844,'-'),'stmn2_cryptic':('chr8',79611214,79616821,'+'),'stmn2_canonical':('chr8',79611214,79636801,'+')}
 def write(name,rows,fields):
@@ -66,18 +80,32 @@ for dataset,root in roots:
     else:
       if original_tissue not in remap: continue
       tissue=remap[original_tissue]
-    sigfile=root/tissue/'cQTL'/'results'/f'{tissue}_cQTL.FDR0.05.txt'
-    if not sigfile.is_file() and original_tissue!=tissue:
-      sigfile=root/original_tissue/'cQTL'/'results'/f'{original_tissue}_cQTL.FDR0.05.txt'
-    sig=set(); sig_available=sigfile.is_file()
-    if sig_available:
-      with sigfile.open() as f:
-        for row in csv.DictReader(f,delimiter='\t'):
-          hits={m.group(0) for value in row.values() if isinstance(value,str) for m in pattern.finditer(value)}
-          if len(hits)==1: sig.update(hits)
-          else: issues.append([str(sigfile),'row has missing or ambiguous circRNA coordinates'])
-      if not sig: issues.append([str(sigfile),'no circRNA IDs parsed; cQTL subset unavailable']); sig_available=False
-    else: issues.append([str(sigfile),'significant cQTL file missing'])
+    sigsets={}; sig_available={}
+    for subset,folder,label in [('cqtl','cQTL','cQTL'),('circ_eqtl','circ_eQTL','eQTL')]:
+      sigfile=root/tissue/folder/'results'/f'{tissue}_{label}.FDR0.05.txt'
+      if not sigfile.is_file() and original_tissue!=tissue:
+        sigfile=root/original_tissue/folder/'results'/f'{original_tissue}_{label}.FDR0.05.txt'
+      sig=set(); sig_available[subset]=sigfile.is_file()
+      if sig_available[subset]:
+        with sigfile.open() as f:
+          reader=csv.DictReader(f,delimiter='\t')
+          aliases=['geneid','gene_id','gene','circ_id','circid','event_id','phenotype_id','circRNA','circRNA_ID','circ']
+          cols={str(k).strip().lower():k for k in (reader.fieldnames or [])}
+          col=next((cols[x.lower()] for x in aliases if x.lower() in cols),None)
+          if not col:
+            issues.append([str(sigfile),'no recognized circRNA ID column; columns: '+', '.join(reader.fieldnames or [])]); sig_available[subset]=False
+          else:
+            bad=0; examples=[]
+            for record in reader:
+              raw=record.get(col,''); event=normalize_id(raw)
+              if event: sig.add(event)
+              else:
+                bad+=1
+                if len(examples)<3: examples.append(str(raw))
+            if bad: issues.append([str(sigfile),f'{bad} unparsed IDs in column {col}; examples: '+repr(examples)])
+            if not sig: issues.append([str(sigfile),'no circRNA IDs parsed; '+subset+' subset unavailable']);sig_available[subset]=False
+      else: issues.append([str(sigfile),subset+' significant results file missing'])
+      sigsets[subset]=sig
     for sd in sorted(x for x in processed.iterdir() if x.is_dir()):
       row={'dataset':dataset,'tissue':tissue,'original_tissue':original_tissue,'sample':sd.name}; junctions=list((sd/'leafcutter'/'juncs').glob('*.junc')); counts=Counter(); jstatus='ok'
       if len(junctions)!=1: jstatus='missing' if not junctions else 'multiple_files'
@@ -105,7 +133,7 @@ for dataset,root in roots:
           duplicates=set()
           for item in reader:
             try:
-              chrom=item['chrom'];chrom=chrom if chrom.startswith('chr') else 'chr'+chrom
+              chrom=item['chrom'].strip();chrom='chr'+re.sub(r'^chr','',chrom,flags=re.I).upper();chrom='chrM' if chrom=='chrMT' else chrom
               start=int(float(item['start']));end=int(float(item['end']));strand=item['strand'].strip();reads=float(item['circ_reads'])
               if not math.isfinite(reads) or start>=end or strand not in ('+','-') or reads<0: continue
               key=f'{chrom}:{start}-{end}:{strand}'
@@ -117,13 +145,20 @@ for dataset,root in roots:
       except (OSError,ValueError) as e: qstatus='unavailable';issues.append([str(qfile),str(e)])
       row['circ_status']=qstatus
       if qstatus=='ok':
-        for subset in ['all','cqtl']:
-          if subset=='cqtl' and not sig_available: continue
-          lengths=[v[0] for k,v in circ.items() if v[1]>=mincirc and (subset=='all' or k in sig)]
-          exon_counts=[count_exons(k) for k,v in circ.items() if v[1]>=mincirc and (subset=='all' or k in sig)]
+        by_unstranded=defaultdict(list)
+        for key in circ: by_unstranded[key.rsplit(':',1)[0]].append(key)
+        for subset in ['all','cqtl','circ_eqtl']:
+          if subset!='all' and not sig_available[subset]: continue
+          sig=sigsets.get(subset,set())
+          # Unstranded QTL IDs are used only when exactly one circRNA matches in this sample.
+          def selected(k):
+            unstranded=k.rsplit(':',1)[0]
+            return subset=='all' or k in sig or (unstranded in sig and len(by_unstranded[unstranded])==1)
+          lengths=[v[0] for k,v in circ.items() if v[1]>=mincirc and selected(k)]
+          exon_counts=[count_exons(k) for k,v in circ.items() if v[1]>=mincirc and selected(k)]
           row[subset+'_n_circs']=len(lengths);row[subset+'_median_span_bp']=statistics.median(lengths) if lengths else '';row[subset+'_median_exon_count']=statistics.median(exon_counts) if exon_counts else ''
       rows.append(row)
-fields=['dataset','tissue','original_tissue','sample','junction_status']+[k+'_reads' for k in events]+['unc13a_junction_depth','unc13a_cryptic_fraction','stmn2_junction_depth','stmn2_cryptic_fraction','circ_status','all_n_circs','all_median_span_bp','all_median_exon_count','cqtl_n_circs','cqtl_median_span_bp','cqtl_median_exon_count']
+fields=['dataset','tissue','original_tissue','sample','junction_status']+[k+'_reads' for k in events]+['unc13a_junction_depth','unc13a_cryptic_fraction','stmn2_junction_depth','stmn2_cryptic_fraction','circ_status','all_n_circs','all_median_span_bp','all_median_exon_count','cqtl_n_circs','cqtl_median_span_bp','cqtl_median_exon_count','circ_eqtl_n_circs','circ_eqtl_median_span_bp','circ_eqtl_median_exon_count']
 write('sample_circ_splicing.tsv',rows,fields)
 for dataset,tissue in sorted({(r['dataset'],r['tissue']) for r in rows}):
   tissue_rows=[r for r in rows if r['dataset']==dataset and r['tissue']==tissue]
@@ -138,15 +173,16 @@ for dataset,tissue in sorted({(r['dataset'],r['tissue']) for r in rows}):
       ax.axis('off');ax.text(.5,.5,'No samples with sufficient junction coverage',ha='center',va='center',wrap=True,transform=ax.transAxes);ax.set_title(gene.upper()+' | n=0')
   fig.suptitle(dataset+' | '+tissue+' — cryptic splicing');fig.savefig(out/f'{dataset}_{tissue}_splicing_histogram.png',dpi=170);plt.close(fig)
   for metric,label,tag in [('median_span_bp','Median circRNA genomic span (bp)','span'),('median_exon_count','Median annotated exons per circRNA','exons')]:
-    fig,axes=plt.subplots(2,2,figsize=(11,7),constrained_layout=True)
+    fig,axes=plt.subplots(2,3,figsize=(16,7),constrained_layout=True)
     for i,gene in enumerate(['unc13a','stmn2']):
-      for j,subset in enumerate(['all','cqtl']):
-        pairs=[(float(r[subset+'_'+metric]),float(r[gene+'_cryptic_fraction'])) for r in tissue_rows if r.get(subset+'_'+metric,'')!='' and r.get(gene+'_cryptic_fraction','')!='']
+      for j,subset in enumerate(['all','cqtl','circ_eqtl']):
+        matched=[r for r in tissue_rows if r.get(subset+'_'+metric,'')!='' and r.get(gene+'_cryptic_fraction','')!='']
+        pairs=[(float(r[subset+'_'+metric]),float(r[gene+'_cryptic_fraction'])) for r in matched]
         n=len(pairs);rho=pval=''
         if n>=3 and len({x for x,y in pairs})>1 and len({y for x,y in pairs})>1:
           res=spearmanr([x for x,y in pairs],[y for x,y in pairs]);rho=float(res.statistic);pval=float(res.pvalue)
         stats.append(dict(dataset=dataset,tissue=tissue,gene=gene,subset=subset,metric=metric,n=n,spearman_rho=rho,p_value=pval))
-        ax=axes[i,j]; title=gene.upper()+' | '+('All detected' if subset=='all' else 'cQTL')+f' | n={n}'
+        ax=axes[i,j]; title=gene.upper()+' | '+{'all':'All detected','cqtl':'cQTL','circ_eqtl':'circ eQTL'}[subset]+f' | n={n}'
         ax.set_title(title)
         if not pairs:
           ax.axis('off');ax.text(.5,.5,'No matched samples with sufficient coverage',ha='center',va='center',wrap=True,transform=ax.transAxes);continue
@@ -156,7 +192,12 @@ for dataset,tissue in sorted({(r['dataset'],r['tissue']) for r in rows}):
         import numpy as np
         bins=np.linspace(lo,hi,min(11,max(3,int(math.sqrt(n))+1)))
         ax.hist([zero,positive],bins=bins,stacked=True,color=['#a9b9c5','#d78758'],label=[f'No cryptic reads (n={len(zero)})',f'Cryptic reads detected (n={len(positive)})'],edgecolor='white')
-        ax.set_xlabel(label);ax.set_ylabel('Samples');ax.legend(fontsize=8,frameon=False)
+        cryptic_counts=[(int(r['unc13a_128_reads'])+int(r['unc13a_178_reads']) if gene=='unc13a' else int(r['stmn2_cryptic_reads'])) for r in matched]
+        detected_counts=[v for v in cryptic_counts if v>0]
+        mean_all=statistics.mean(cryptic_counts)
+        mean_detected=f'{statistics.mean(detected_counts):.2f}' if detected_counts else 'NA'
+        ax.text(.98,.77,f'Mean cryptic reads: {mean_all:.2f} per sample\nAmong detected: {mean_detected}',transform=ax.transAxes,ha='right',va='top',fontsize=7,color='#444444',bbox=dict(facecolor='white',alpha=.8,edgecolor='none'))
+        ax.set_xlabel(label);ax.set_ylabel('Samples');ax.legend(fontsize=7,frameon=False)
     fig.suptitle(dataset+' | '+tissue+' — sample distributions');fig.savefig(out/f'{dataset}_{tissue}_{tag}_histogram.png',dpi=170);plt.close(fig)
 write('correlations.tsv',stats,['dataset','tissue','gene','subset','metric','n','spearman_rho','p_value'])
 with (out/'issues.tsv').open('w') as f:
