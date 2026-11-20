@@ -114,8 +114,10 @@ for dataset,root in roots:
           with junctions[0].open() as f:
             for line in f:
               a=line.split()
-              if len(a)<6 or a[0] not in ('chr8','chr19'): continue
-              try: key=(a[0],int(a[1]),int(a[2]),a[5]); n=int(a[4])
+              if len(a)<6: continue
+              chrom='chr'+re.sub(r'^chr','',a[0],flags=re.I)
+              if chrom not in ('chr8','chr19'): continue
+              try: key=(chrom,int(a[1]),int(a[2]),a[5]); n=int(a[4])
               except ValueError: continue
               for name,coord in events.items():
                 if key==coord: counts[name]+=n
