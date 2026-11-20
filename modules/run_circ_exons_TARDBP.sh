@@ -1,10 +1,10 @@
 #!/bin/bash
 #SBATCH --job-name=circ_exons_TARDBP
-#SBATCH --time=08:00:00
-#SBATCH --mem=12G
+#SBATCH --time=04:00:00
+#SBATCH --mem=16G
 #SBATCH --cpus-per-task=1
-#SBATCH --output=/home/zw529/donglab/data/target_ALS/QTL/circ_exons_TARDBP.out
-#SBATCH --error=/home/zw529/donglab/data/target_ALS/QTL/circ_exons_TARDBP.err
+#SBATCH --output=circ_exons_TARDBP_%j.out
+#SBATCH --error=circ_exons_TARDBP_%j.err
 
 set -euo pipefail
 # Submit with: sbatch run_circ_exons_TARDBP.sh
@@ -13,6 +13,11 @@ TARGET_ROOT="${TARGET_ROOT:-$HOME/donglab/data/target_ALS}"
 ANSWER_ROOT="${ANSWER_ROOT:-$HOME/donglab/data/answer_ALS}"
 GTF="${GTF:-$HOME/donglab/references/genome/Homo_sapiens/UCSC/hg38/Annotation/gencode/gencode.v49.annotation.gtf}"
 OUTDIR="${OUTDIR:-$TARGET_ROOT/QTL/circ_exon_TARDBP_summary}"
+module purge
+unset PYTHONPATH PYTHONHOME
+export PYTHONNOUSERSITE=1
+module load deepTools
+python -c 'import sys, matplotlib; print("Plot Python:", sys.executable); print("Matplotlib:", matplotlib.__file__)'
 python - --root "$TARGET_ROOT" --answer-root "$ANSWER_ROOT" --gtf "$GTF" --out "$OUTDIR" <<'PYTHON_ANALYSIS'
 #!/usr/bin/env python3
 """Summarize significant circRNA QTL intervals and TARDBP sample inclusion."""
