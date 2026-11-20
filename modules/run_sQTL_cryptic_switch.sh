@@ -4,18 +4,19 @@
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=12G
 #SBATCH --time=06:00:00
-#SBATCH --output=sqtl_cryptic_switch.out
-#SBATCH --error=sqtl_cryptic_switch.err
+#SBATCH --output=/home/zw529/donglab/data/target_ALS/QTL/sqtl_cryptic_switch.out
+#SBATCH --error=/home/zw529/donglab/data/target_ALS/QTL/sqtl_cryptic_switch.err
 
 # Submit: sbatch run_sqtl_annotated_cryptic.sh --tissues Frontal_Cortex
 # Omit --tissues to run all five Target ALS tissues. Additional options:
 # --root PATH --outdir PATH --gtf PATH --min-n 5
 set -euo pipefail
+module load R
 TASK_PYTHON=/home/zw529/donglab/pipelines/modules/miniconda3/bin/python
 "$TASK_PYTHON" -I -u - "$@" <<'PYTHON'
 #!/usr/bin/env python3
 """Rank opposite genotype-associated changes in connected annotated/cryptic junctions."""
-import argparse, csv, re
+import argparse, csv, re, subprocess
 from pathlib import Path
 from collections import defaultdict
 import numpy as np
@@ -48,24 +49,41 @@ def main():
     p.add_argument('--gtf',type=Path,default=Path.home()/'donglab/references/genome/Homo_sapiens/UCSC/hg38/Annotation/gencode/gencode.v49.annotation.gtf')
     p.add_argument('--tissues',nargs='+',default=TISSUES)
     p.add_argument('--min-n',type=int,default=5)
+    p.add_argument('--metadata',type=Path,help='Target ALS metadata CSV')
+    p.add_argument('--leafviz',type=Path,default=Path.home()/'donglab/pipelines/scripts/QTL/plot_sQTL_leafviz_PSI.R')
+    p.add_argument('--no-plots',action='store_true')
     a=p.parse_args(); out=a.outdir or a.root/'QTL/sqtl_annotated_cryptic'; out.mkdir(parents=True,exist_ok=True)
     if a.min_n < 1: p.error('--min-n must be positive')
     # Whole transcripts, sorted by genomic position; LeafViz uses exon end and next exon start.
     tx=defaultdict(list)
+    txgenes={}
     with a.gtf.open() as f:
         for line in f:
             if line.startswith('#'): continue
             x=line.rstrip('\n').split('\t')
             if len(x)<9 or x[2]!='exon': continue
             m=re.search(r'transcript_id "([^"]+)"',x[8])
-            if m: tx[(x[0],x[6],m.group(1))].append((int(x[3]),int(x[4])))
+            if m:
+                key=(x[0],x[6],m.group(1)); tx[key].append((int(x[3]),int(x[4])))
+                gene=re.search(r'gene_name "([^"]+)"',x[8])
+                if gene: txgenes[key]=gene.group(1)
     annotated=set()
-    for (c,strand,_),exons in tx.items():
+    junction_genes=defaultdict(set)
+    for (c,strand,transcript),exons in tx.items():
         exons=sorted(set(exons))
-        annotated.update((c,strand,left[1],right[0]) for left,right in zip(exons,exons[1:]) if left[1]<right[0])
+        for left,right in zip(exons,exons[1:]):
+            if left[1]<right[0]:
+                key=(c,strand,left[1],right[0]); annotated.add(key)
+                if (c,strand,transcript) in txgenes: junction_genes[key].add(txgenes[(c,strand,transcript)])
     del tx
     print('Annotated junctions:',len(annotated),flush=True)
     audit=[]
+    patterns={'Cortex':r'Cortex','Spinal_Cord':r'Spinal[ _-]*Cord','Cerebellum':'Cerebellum','Frontal_Cortex':'Frontal','Motor_Cortex':r'Motor.*Cortex|Cortex.*Motor|BA4','Cervical_Spinal_Cord':'Cervical','Lumbar_Spinal_Cord':r'Lumbar|Lumbosacral'}
+    if not a.no_plots:
+        if not a.leafviz.is_file(): raise FileNotFoundError(f'LeafViz script not found: {a.leafviz}')
+        meta=pd.read_csv(a.metadata or a.root/'targetALS_rnaseq_metadata.csv',low_memory=False)
+        for column in ['externalsubjectid','externalsampleid','tissue']:
+            if column not in meta: raise ValueError(f'Metadata missing {column}')
     for tissue in a.tissues:
         q=a.root/tissue/'sQTL'; folder=out/tissue; folder.mkdir(parents=True,exist_ok=True)
         sig=pd.read_csv(q/'results'/f'{tissue}_sQTL.FDR0.05.txt',sep='\t')
@@ -130,6 +148,41 @@ def main():
             df=df.sort_values(['switch_score_pp','FDR','junction_id','snpid','partner_junction'],ascending=[False,True,True,True,True]); df.insert(0,'rank',range(1,len(df)+1))
         else: df=pd.DataFrame(columns=['rank','tissue','junction_id','snpid','annotated_junction','cryptic_junction','switch_score_pp'])
         df.to_csv(folder/'ranked_switches.tsv',sep='\t',index=False,na_rep='NA')
+        df.head(5).to_csv(folder/'top5_switches.tsv',sep='\t',index=False,na_rep='NA')
+        if not a.no_plots and not df.empty:
+            pattern=patterns.get(tissue,re.escape(tissue))
+            mt=meta.copy()
+            mismatch=a.root/tissue/'eQTL/potential_sex_mismatches.txt'
+            if mismatch.exists(): mt=mt[~mt.externalsampleid.isin(mismatch.read_text().splitlines())]
+            mt=mt[mt.externalsubjectid.isin(subjects)]
+            mt=mt[mt.tissue.astype(str).str.contains(pattern,case=False,regex=True,na=False)]
+            if 'post_mortem_interval_in_hours' not in mt or len(mt.columns)<18: raise ValueError('Metadata lacks PMI or the RIN columns used by the original script')
+            mt=mt.copy(); mt['RIN_score']=mt.iloc[:,[16,17]].apply(pd.to_numeric,errors='coerce').fillna(0).max(axis=1)
+            mt=mt[(pd.to_numeric(mt.post_mortem_interval_in_hours,errors='coerce')<=40)&(mt.RIN_score>=3)]
+            mt=mt.sort_values(['RIN_score','externalsampleid'],ascending=[False,True]).drop_duplicates('externalsubjectid')
+            for top in df.head(5).to_dict('records'):
+                rank=int(top['rank']); anchor=top['junction_id']; partner=top['partner_junction']; snp=top['snpid']
+                g=gts[snp][order]; g=2-g if top['plink_counted_allele']==top['ref'] else g
+                paired=np.isfinite(g)&np.isfinite(psis[anchor])&np.isfinite(psis[partner])
+                keep=np.asarray(subjects)[paired]
+                selected=mt[mt.externalsubjectid.isin(keep)].copy()
+                missing=set(keep)-set(selected.externalsubjectid)
+                if missing: raise ValueError(f'Rank {rank}: {len(missing)} paired ranking subjects lack eligible metadata; cannot make a plot with the ranking cohort')
+                prefix=f'rank_{rank:02d}__'+re.sub(r'[^A-Za-z0-9_.+-]','_',anchor+'__'+snp)
+                metadata_file=folder/(prefix+'.metadata.csv'); genotype_file=folder/(prefix+'.genotypes.tsv')
+                selected.to_csv(metadata_file,index=False)
+                pd.DataFrame({'externalsubjectid':keep,'GT':pd.Series(g[paired]).map({0:'0/0',1:'0/1',2:'1/1'})}).to_csv(genotype_file,sep='\t',index=False)
+                names=sorted(junction_genes[jid(top['annotated_junction'])])
+                if not names: raise ValueError(f'No gene name for annotated junction {top["annotated_junction"]}')
+                cmd=['Rscript',str(a.leafviz),'--tissue',tissue,'--tissue-regex',pattern,'--anchor',anchor,'--gene',names[0],'--variant-chr',top['variant_chr'],'--variant-pos',str(top['variant_pos']),'--variant-id',snp,'--variant-ref',top['ref'],'--variant-alt',top['alt'],'--genotypes',str(genotype_file),'--metadata',str(metadata_file),'--data-root',str(a.root),'--gtf',str(a.gtf),'--outdir',str(folder),'--prefix',prefix,'--psi-matrix',str(q/f'splicing_{tissue}.txt')]
+                print('Plotting',tissue,'rank',rank,anchor,snp,flush=True)
+                with (folder/(prefix+'.plot.log')).open('w') as log: subprocess.run(cmd,stdout=log,stderr=subprocess.STDOUT,check=True)
+                junctions=pd.read_csv(folder/(prefix+'.PSI.junctions.tsv'),sep='\t')
+                found=set(junctions.junction_id)
+                if partner not in found: raise ValueError(f'Rank {rank}: LeafViz did not discover ranked partner {partner}; see {prefix}.plot.log')
+                verdict=dict(zip(junctions.junction_id,junctions.verdict))
+                if verdict.get(top['annotated_junction'])!='annotated' or verdict.get(top['cryptic_junction'])!='cryptic':
+                    print(f'WARNING rank {rank}: LeafViz gene-restricted annotation differs from ranking; inspect {prefix}.PSI.junctions.tsv',flush=True)
         audit.append(dict(tissue=tissue,significant_pairs=len(sig),anchors_with_matrix_partners=len(partners),ranked_pairs=len(df),**excluded))
         print(tissue,'ranked',len(df),'exclusions',dict(excluded),flush=True)
     pd.DataFrame(audit).fillna(0).to_csv(out/'audit.tsv',sep='\t',index=False)
