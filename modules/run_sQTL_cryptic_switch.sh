@@ -3,12 +3,12 @@
 #SBATCH --partition=day
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=12G
-#SBATCH --time=06:00:00
+#SBATCH --time=08:00:00
 #SBATCH --output=/home/zw529/donglab/data/target_ALS/QTL/sqtl_cryptic_switch.out
 #SBATCH --error=/home/zw529/donglab/data/target_ALS/QTL/sqtl_cryptic_switch.err
 
 # Submit: sbatch run_sqtl_annotated_cryptic.sh --tissues Frontal_Cortex
-# Omit --tissues to run all five Target ALS tissues. Additional options:
+# Omit --tissues to run all seven configured Target ALS tissues. Additional options:
 # --root PATH --outdir PATH --gtf PATH --min-n 5
 set -euo pipefail
 module load R
@@ -148,7 +148,17 @@ def main():
             df=df.sort_values(['switch_score_pp','FDR','junction_id','snpid','partner_junction'],ascending=[False,True,True,True,True]); df.insert(0,'rank',range(1,len(df)+1))
         else: df=pd.DataFrame(columns=['rank','tissue','junction_id','snpid','annotated_junction','cryptic_junction','switch_score_pp'])
         df.to_csv(folder/'ranked_switches.tsv',sep='\t',index=False,na_rep='NA')
-        df.head(5).to_csv(folder/'top5_switches.tsv',sep='\t',index=False,na_rep='NA')
+        # A splicing event is the annotated/cryptic junction pair, irrespective
+        # of which junction was the significant anchor. Keep distinct SNPs.
+        chosen=[]; event_snps=defaultdict(set); plotted_anchors=set()
+        for row in df.to_dict('records'):
+            event=(row['annotated_junction'],row['cryptic_junction'])
+            snp=row['snpid']; anchor_snp=(row['junction_id'],snp)
+            if snp in event_snps[event] or len(event_snps[event])>=2 or anchor_snp in plotted_anchors: continue
+            chosen.append(row); event_snps[event].add(snp); plotted_anchors.add(anchor_snp)
+            if len(chosen)==10: break
+        selected_df=pd.DataFrame(chosen,columns=df.columns)
+        selected_df.to_csv(folder/'top10_switches.tsv',sep='\t',index=False,na_rep='NA')
         if not a.no_plots and not df.empty:
             pattern=patterns.get(tissue,re.escape(tissue))
             mt=meta.copy()
@@ -160,7 +170,7 @@ def main():
             mt=mt.copy(); mt['RIN_score']=mt.iloc[:,[16,17]].apply(pd.to_numeric,errors='coerce').fillna(0).max(axis=1)
             mt=mt[(pd.to_numeric(mt.post_mortem_interval_in_hours,errors='coerce')<=40)&(mt.RIN_score>=3)]
             mt=mt.sort_values(['RIN_score','externalsampleid'],ascending=[False,True]).drop_duplicates('externalsubjectid')
-            for top in df.head(5).to_dict('records'):
+            for top in chosen:
                 rank=int(top['rank']); anchor=top['junction_id']; partner=top['partner_junction']; snp=top['snpid']
                 g=gts[snp][order]; g=2-g if top['plink_counted_allele']==top['ref'] else g
                 paired=np.isfinite(g)&np.isfinite(psis[anchor])&np.isfinite(psis[partner])
@@ -168,12 +178,13 @@ def main():
                 selected=mt[mt.externalsubjectid.isin(keep)].copy()
                 missing=set(keep)-set(selected.externalsubjectid)
                 if missing: raise ValueError(f'Rank {rank}: {len(missing)} paired ranking subjects lack eligible metadata; cannot make a plot with the ranking cohort')
-                prefix=f'rank_{rank:02d}__'+re.sub(r'[^A-Za-z0-9_.+-]','_',anchor+'__'+snp)
+                names=sorted(junction_genes[jid(top['annotated_junction'])])
+                if not names: raise ValueError(f'No gene name for annotated junction {top["annotated_junction"]}')
+                gene_label=';'.join(re.sub(r'[^A-Za-z0-9_.+-]','_',name) for name in names)
+                prefix=gene_label+'__'+re.sub(r'[^A-Za-z0-9_.+-]','_',anchor+'__'+snp)
                 metadata_file=folder/(prefix+'.metadata.csv'); genotype_file=folder/(prefix+'.genotypes.tsv')
                 selected.to_csv(metadata_file,index=False)
                 pd.DataFrame({'externalsubjectid':keep,'GT':pd.Series(g[paired]).map({0:'0/0',1:'0/1',2:'1/1'})}).to_csv(genotype_file,sep='\t',index=False)
-                names=sorted(junction_genes[jid(top['annotated_junction'])])
-                if not names: raise ValueError(f'No gene name for annotated junction {top["annotated_junction"]}')
                 cmd=['Rscript',str(a.leafviz),'--tissue',tissue,'--tissue-regex',pattern,'--anchor',anchor,'--gene',names[0],'--variant-chr',top['variant_chr'],'--variant-pos',str(top['variant_pos']),'--variant-id',snp,'--variant-ref',top['ref'],'--variant-alt',top['alt'],'--genotypes',str(genotype_file),'--metadata',str(metadata_file),'--data-root',str(a.root),'--gtf',str(a.gtf),'--outdir',str(folder),'--prefix',prefix,'--psi-matrix',str(q/f'splicing_{tissue}.txt')]
                 print('Plotting',tissue,'rank',rank,anchor,snp,flush=True)
                 with (folder/(prefix+'.plot.log')).open('w') as log: subprocess.run(cmd,stdout=log,stderr=subprocess.STDOUT,check=True)
