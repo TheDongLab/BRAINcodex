@@ -3,8 +3,8 @@
 #SBATCH --time=04:00:00
 #SBATCH --mem=16G
 #SBATCH --cpus-per-task=1
-#SBATCH --output=circ_exons_TARDBP_%j.out
-#SBATCH --error=circ_exons_TARDBP_%j.err
+#SBATCH --output=/home/zw529/donglab/data/target_ALS/QTL/circ_exons_TARDBP.out
+#SBATCH --error=/home/zw529/donglab/data/target_ALS/QTL/circ_exons_TARDBP.err
 
 set -euo pipefail
 # Submit with: sbatch run_circ_exons_TARDBP.sh
