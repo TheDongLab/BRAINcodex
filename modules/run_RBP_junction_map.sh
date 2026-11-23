@@ -3,13 +3,11 @@
 #SBATCH --partition=day
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=200G
-#SBATCH --time=23:00:00
+#SBATCH --time=24:00:00
 #SBATCH --output=/home/zw529/donglab/data/target_ALS/QTL/rbp_junction_map.out
 #SBATCH --error=/home/zw529/donglab/data/target_ALS/QTL/rbp_junction_map.err
-
 set -euo pipefail
-
-# Usage: sbatch run_RBP_junction_map.sh [--cohort both|target|answer] [--tissues TISSUE ...]
+# Usage: sbatch run_rbp_junction_map.sh [--cohort both|target|answer] [--tissues TISSUE ...]
 # Override Python with TASK_PYTHON; run --help for all options.
 TASK_PYTHON=${TASK_PYTHON:-/home/zw529/donglab/pipelines/modules/miniconda3/bin/python}
 if [[ ! -x "$TASK_PYTHON" ]]; then
@@ -28,6 +26,7 @@ import numpy as np
 import pandas as pd
 try:
  from scipy.stats import t as tdist
+ from scipy.linalg import qr
 except ImportError:
  sys.exit('Missing scipy; set TASK_PYTHON to an environment containing numpy, pandas and scipy.')
 
@@ -54,7 +53,8 @@ def op(p): return gzip.open(p,'rt') if str(p).endswith('.gz') else open(p)
 def bh(x):
  x=np.asarray(x); order=np.argsort(x); vals=x[order]*len(x)/np.arange(1,len(x)+1); vals=np.minimum.accumulate(vals[::-1])[::-1]; out=np.empty(len(x)); out[order]=np.minimum(vals,1); return out
 # GTF exon pairs: PSI junction convention is upstream exon end and downstream exon start.
-rbps=pd.read_csv(a.rbp_list,comment='#',dtype=str).fillna('')
+rbps=pd.read_csv(a.rbp_list,comment='#',usecols=['Gene_Name','Is_RBP'],dtype=str).fillna('')
+rbps=rbps[rbps.Is_RBP.str.upper().str.strip()=='TRUE']
 if 'Gene_Name' not in rbps: sys.exit('RBP list lacks Gene_Name')
 symbols=set(rbps.Gene_Name.str.strip())-{''}
 transcripts=defaultdict(list); gene_symbols=defaultdict(set)
@@ -115,7 +115,7 @@ def design(meta,covs):
  # Complete-case design; only covariates with sufficient nonmissing data are selected.
  keep=[]; encoded=[]
  for c in covs:
-  z=meta[c].replace('',np.nan); numeric=pd.to_numeric(z,errors='coerce')
+  z=meta[c].replace('',np.nan); z=z.str.strip().str.lower() if c.lower() in ('sex','subject_group') else z; numeric=pd.to_numeric(z,errors='coerce')
   numeric_col=c.lower() in ('age_at_death','rin','post_mortem_interval_in_hours','age_at_first_pbmc_collection')
   if numeric_col:
    if numeric.notna().sum()>=max(a.min_samples,int(.8*len(meta))) and numeric.nunique()>1: keep.append(c); encoded.append(numeric.rename(c))
@@ -137,6 +137,7 @@ def run(cohort):
    if not d.is_dir(): continue
    key=normid(d.name); jf=d/'leafcutter/juncs'/f'{d.name}.junc'; ef=d/'normalization.tab'; reason=''
    if not jf.is_file() or not ef.is_file(): reason='missing_junction_or_expression'
+   elif ef.stat().st_size==0 or sum(1 for _ in ef.open())<=1: reason='empty_expression_file'
    elif key not in metadata.index: reason='metadata_not_matched'
    elif not str(metadata.loc[key,subject]).strip(): reason='missing_or_conflicting_subject'
    else:
@@ -149,25 +150,38 @@ def run(cohort):
   if len(samples)<a.min_samples: print(tissue.name,'too few matched samples',len(samples),flush=True); continue
   meta=metadata.loc[[s[1] for s in samples]].copy(); X,valid,covused=design(meta,covs)
   # Check rank after complete-case selection; avoid a false regression if design is singular.
-  if valid.sum()<a.min_samples or np.linalg.matrix_rank(X[valid])<X.shape[1]:
-   print(tissue.name,'insufficient complete cases or singular covariate design; inspect sample audit',flush=True); continue
+  if valid.sum()<a.min_samples:
+   print(tissue.name,'insufficient complete cases:',int(valid.sum()),flush=True); continue
+  _,_,pivot=qr(X[valid],mode='economic',pivoting=True)
+  rank=np.linalg.matrix_rank(X[valid]); selected=sorted(pivot[:rank]); dropped=X.shape[1]-rank
+  if dropped: print('Dropping',dropped,'redundant model columns',flush=True)
+  X=X[:,selected]
   print(cohort,tissue.name,'samples',len(samples),'complete',valid.sum(),'covariates',covused,flush=True)
   js=[]; ex=[]; pooled=Counter()
   for name,key,jf,ef in samples:
    j=read_junc(jf); js.append(j); pooled.update(j); ex.append(expression(ef))
-  # Shared clusters are overlapping genomic introns, after pooled support >=5.
+  # Shared clusters are connected by shared splice sites, after pooled support >=5.
   groups=defaultdict(list)
   for (c,s,start,end),n in pooled.items():
    if n>=5: groups[(c,s)].append((start,end))
   clusters=[]
   for (c,s),intervals in groups.items():
-   cur=[]; end=-1
-   for start,stop in sorted(intervals):
-    if cur and start>end: clusters.append((c,s,cur)); cur=[]; end=-1
-    cur.append((start,stop)); end=max(end,stop)
-   if cur: clusters.append((c,s,cur))
+   parent={}
+   def find(x):
+    parent.setdefault(x,x)
+    if parent[x]!=x: parent[x]=find(parent[x])
+    return parent[x]
+   def union(x,y):
+    x=find(x); y=find(y)
+    if x!=y: parent[y]=x
+   for start,stop in intervals: union(('L',start),('R',stop))
+   sets=defaultdict(list)
+   for start,stop in intervals: sets[find(('L',start))].append((start,stop))
+   for ivs in sets.values(): clusters.append((c,s,ivs))
+  print('Shared clusters:',len(clusters),'largest:',max((len(x[2]) for x in clusters),default=0),flush=True)
   geneids=sorted(gene_symbols); E=np.array([[row.get(g,np.nan) for g in geneids] for row in ex],dtype=float)
-  genes=[i for i in range(len(geneids)) if np.isfinite(E[:,i]).all() and np.median(E[:,i])>=a.min_tpm and np.std(E[valid,i])>0]
+  genes=[i for i in range(len(geneids)) if np.isfinite(E[valid,i]).sum()>=a.min_samples and np.nanmedian(E[valid,i])>=a.min_tpm and np.nanstd(E[valid,i])>0]
+  print('Eligible RBP genes:',len(genes),flush=True)
   records=[]; tested_events=0
   for c,s,ivs in clusters:
    keys=[(c,s,l,r) for l,r in ivs]
@@ -183,6 +197,7 @@ def run(cohort):
     if yy<1e-12: continue
     tested_events+=1
     for i in genes:
+     if not np.isfinite(E[mask,i]).all(): continue
      raw=np.log2(E[mask,i]+1); xr=raw-xx@np.linalg.lstsq(xx,raw,rcond=None)[0]; ss=float(xr@xr)
      if ss<1e-12: continue
      corr=float(np.clip((xr@yres)/math.sqrt(ss*yy),-1+1e-12,1-1e-12)); pv=float(2*tdist.sf(abs(corr)*math.sqrt(df/(1-corr*corr)),df))
@@ -200,7 +215,7 @@ def run(cohort):
   edges=sig.head(a.max_map_edges).to_dict('records'); data=json.dumps(edges).replace('</','<\\/')
   html='''<!doctype html><meta charset="utf-8"><title>RBP junction associations</title><style>body{font:14px sans-serif}svg{border:1px solid #ddd}line{stroke-opacity:.32}text{font-size:11px;cursor:pointer}input{margin:8px}</style><h2>RBP–unannotated junction associations</h2><p>Click a label to highlight its links. Red: positive; blue: negative. Display limited to the strongest edges; see tables for all results.</p><input id="q" placeholder="Search label"><svg id="g"></svg><script>const E=DATA,svg=document.querySelector('#g'),N='http://www.w3.org/2000/svg';let L=[...new Set(E.map(x=>x.rbp_gene))].sort(),R=[...new Set(E.map(x=>x.junction_id))].sort(),h=Math.max(400,24*Math.max(L.length,R.length)+60);svg.setAttribute('width',1200);svg.setAttribute('height',h);let lines=[];function el(n,a){let z=document.createElementNS(N,n);for(let k in a)z.setAttribute(k,a[k]);svg.appendChild(z);return z} E.forEach(e=>{let l=el('line',{x1:250,y1:30+24*L.indexOf(e.rbp_gene),x2:750,y2:30+24*R.indexOf(e.junction_id),stroke:e.partial_r>0?'#d45d57':'#447bb5','stroke-width':1.5});lines.push([l,e])}); function label(s,x,y){let t=el('text',{x,y});t.textContent=s;t.onclick=()=>lines.forEach(([l,e])=>l.style.strokeOpacity=(e.rbp_gene===s||e.junction_id===s)?1:.03)} L.forEach((s,i)=>label(s,10,34+24*i));R.forEach((s,i)=>label(s,760,34+24*i));document.querySelector('#q').oninput=e=>{let q=e.target.value.toLowerCase();lines.forEach(([l,x])=>l.style.strokeOpacity=!q||x.rbp_gene.toLowerCase().includes(q)||x.junction_id.toLowerCase().includes(q)? .8:.03)};</script>'''.replace('DATA',data)
   (out/'matching_map.html').write_text(html)
-  (out/'analysis_summary.json').write_text(json.dumps(dict(cohort=cohort,tissue=tissue.name,samples=len(samples),complete_cases=int(valid.sum()),covariates=covused,tested_events=tested_events,tested_pairs=len(res),significant_pairs=len(sig),fdr_threshold=a.fdr,shared_cluster='overlapping intervals; pooled junction reads >= 5',coordinate_convention='junc end + 1; compare exon-end to next exon-start',map_edges=min(len(sig),a.max_map_edges)),indent=2))
+  (out/'analysis_summary.json').write_text(json.dumps(dict(cohort=cohort,tissue=tissue.name,samples=len(samples),complete_cases=int(valid.sum()),covariates=covused,tested_events=tested_events,tested_pairs=len(res),significant_pairs=len(sig),fdr_threshold=a.fdr,shared_cluster='junctions connected by shared splice site; pooled junction reads >= 5',coordinate_convention='junc end + 1; compare exon-end to next exon-start',map_edges=min(len(sig),a.max_map_edges)),indent=2))
   print(cohort,tissue.name,'tested pairs',len(res),'significant',len(sig),flush=True)
 for cohort in (['target','answer'] if a.cohort=='both' else [a.cohort]): run(cohort)
 print('Outputs:',a.outdir,flush=True)
