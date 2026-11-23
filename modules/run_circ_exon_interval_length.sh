@@ -46,7 +46,7 @@ def normalize_id(value):
   return None
 
 roots=[('target_ALS',Path(os.environ['TARGET_ROOT'])),('answer_ALS',Path(os.environ['ANSWER_ROOT']))]
-events={'unc13a_128':('chr19',17642541,17642844,'-'),'unc13a_178':('chr19',17642591,17642844,'-'),'unc13a_skip':('chr19',17641556,17642844,'-'),'stmn2_cryptic':('chr8',79611214,79616821,'+'),'stmn2_canonical':('chr8',79611214,79636801,'+'),'poldip3_skip':('chr22',42599793,42602769,'-'),'poldip3_inclusion':('chr22',42599793,42601969,'-'),'synj2_cryptic':('chr6',158017290,158019983,'+'),'synj2_canonical':('chr6',158017290,158028755,'+'),'phf2_cryptic':('chr9',93660560,93661347,'+'),'phf2_canonical':('chr9',93660560,93662906,'+')}
+events={'unc13a_128':('chr19',17642541,17642844,'-'),'unc13a_178':('chr19',17642591,17642844,'-'),'unc13a_skip':('chr19',17641556,17642844,'-'),'stmn2_cryptic':('chr8',79611214,79616821,'+'),'stmn2_canonical':('chr8',79611214,79636801,'+'),'synj2_cryptic':('chr6',158017290,158019983,'+'),'synj2_canonical':('chr6',158017290,158028755,'+'),'phf2_cryptic':('chr9',93660560,93661347,'+'),'phf2_canonical':('chr9',93660560,93662906,'+')}
 def write(name,rows,fields):
     with (out/name).open('w',newline='') as f:
         w=csv.DictWriter(f,fieldnames=fields,delimiter='\t',extrasaction='ignore');w.writeheader();w.writerows(rows)
@@ -118,7 +118,7 @@ for dataset,root in roots:
               a=line.split()
               if len(a)<6: continue
               chrom='chr'+re.sub(r'^chr','',a[0],flags=re.I)
-              if chrom not in ('chr6','chr8','chr9','chr19','chr22'): continue
+              if chrom not in ('chr6','chr8','chr9','chr19'): continue
               try: key=(chrom,int(a[1]),int(a[2]),a[5]); n=int(a[4])
               except ValueError: continue
               for name,coord in events.items():
@@ -127,7 +127,7 @@ for dataset,root in roots:
       row['junction_status']=jstatus
       for name in events: row[name+'_reads']=counts[name] if jstatus=='ok' else ''
       if jstatus=='ok':
-        for gene,crypt,canonical in [('unc13a',counts['unc13a_128']+counts['unc13a_178'],counts['unc13a_skip']),('stmn2',counts['stmn2_cryptic'],counts['stmn2_canonical']),('poldip3',counts['poldip3_skip'],counts['poldip3_inclusion']),('synj2',counts['synj2_cryptic'],counts['synj2_canonical']),('phf2',counts['phf2_cryptic'],counts['phf2_canonical'])]:
+        for gene,crypt,canonical in [('unc13a',counts['unc13a_128']+counts['unc13a_178'],counts['unc13a_skip']),('stmn2',counts['stmn2_cryptic'],counts['stmn2_canonical']),('synj2',counts['synj2_cryptic'],counts['synj2_canonical']),('phf2',counts['phf2_cryptic'],counts['phf2_canonical'])]:
           depth=crypt+canonical;row[gene+'_junction_depth']=depth;row[gene+'_cryptic_fraction']=crypt/depth if depth>=minj and depth>0 else ''
       qfile=sd/'circularRNA_known_circ_percentage.txt'; circ={};qstatus='ok'
       try:
@@ -162,27 +162,10 @@ for dataset,root in roots:
           exon_counts=[count_exons(k) for k,v in circ.items() if v[1]>=mincirc and selected(k)]
           row[subset+'_n_circs']=len(lengths);row[subset+'_median_span_bp']=statistics.median(lengths) if lengths else '';row[subset+'_median_exon_count']=statistics.median(exon_counts) if exon_counts else ''
       rows.append(row)
-fields=['dataset','tissue','original_tissue','sample','junction_status']+[k+'_reads' for k in events]+['unc13a_junction_depth','unc13a_cryptic_fraction','stmn2_junction_depth','stmn2_cryptic_fraction','poldip3_junction_depth','poldip3_cryptic_fraction','synj2_junction_depth','synj2_cryptic_fraction','phf2_junction_depth','phf2_cryptic_fraction','circ_status','all_n_circs','all_median_span_bp','all_median_exon_count','cqtl_n_circs','cqtl_median_span_bp','cqtl_median_exon_count','circ_eqtl_n_circs','circ_eqtl_median_span_bp','circ_eqtl_median_exon_count']
+fields=['dataset','tissue','original_tissue','sample','junction_status']+[k+'_reads' for k in events]+['unc13a_junction_depth','unc13a_cryptic_fraction','stmn2_junction_depth','stmn2_cryptic_fraction','synj2_junction_depth','synj2_cryptic_fraction','phf2_junction_depth','phf2_cryptic_fraction','circ_status','all_n_circs','all_median_span_bp','all_median_exon_count','cqtl_n_circs','cqtl_median_span_bp','cqtl_median_exon_count','circ_eqtl_n_circs','circ_eqtl_median_span_bp','circ_eqtl_median_exon_count']
 write('sample_circ_splicing.tsv',rows,fields)
 for dataset,tissue in sorted({(r['dataset'],r['tissue']) for r in rows}):
   tissue_rows=[r for r in rows if r['dataset']==dataset and r['tissue']==tissue]
-  # Three views: cryptic splicing, sample-median span, sample-median exon count.
-  fig,axes=plt.subplots(1,2,figsize=(10,4),constrained_layout=True)
-  for ax,gene in zip(axes,['unc13a','stmn2']):
-    fractions=[float(r[gene+'_cryptic_fraction']) for r in tissue_rows if r.get(gene+'_cryptic_fraction','')!='']
-    if fractions:
-      # Zero is a discrete category; positive fractions use explicit unequal-width bins.
-      bins=[0,0.1,0.5,1,5,10,25,50,75,100]
-      labels=['0','>0–0.1','>0.1–0.5','>0.5–1','>1–5','>5–10','>10–25','>25–50','>50–75','>75–100']
-      counts=[sum(v==0 for v in fractions)]
-      percentages=[v*100 for v in fractions if v>0]
-      counts.extend(sum(lo < v <= hi for v in percentages) for lo,hi in zip(bins[:-1],bins[1:]))
-      ax.bar(range(len(labels)),counts,color=['#c44e52']+['#426d89']*(len(labels)-1),edgecolor='white')
-      ax.set_xticks(range(len(labels)));ax.set_xticklabels(labels,rotation=45,ha='right',fontsize=8)
-      ax.set_xlabel('Cryptic junction fraction (%)');ax.set_ylabel('Samples'); ax.set_title(gene.upper()+f' | n={len(fractions)}')
-    else:
-      ax.axis('off');ax.text(.5,.5,'No samples with sufficient junction coverage',ha='center',va='center',wrap=True,transform=ax.transAxes);ax.set_title(gene.upper()+' | n=0')
-  fig.suptitle(dataset+' | '+tissue+' — cryptic splicing');fig.savefig(out/f'{dataset}_{tissue}_splicing_histogram.png',dpi=170);plt.close(fig)
   for metric,label,tag in [('median_span_bp','Median circRNA genomic span (bp)','span'),('median_exon_count','Median annotated exons per circRNA','exons')]:
     fig,axes=plt.subplots(2,3,figsize=(16,7),constrained_layout=True)
     for i,gene in enumerate(['unc13a','stmn2']):
@@ -282,72 +265,11 @@ for row in rows:
     result.update(pathology_sample_id=record['Sample ID'],pathology_tissue_source=record['Tissue Source'],tdp43_neuronal=score(record['P Tdp 43 Inclusions Neuronal']),tdp43_glial=score(record['P Tdp 43 Inclusions Glial']))
   linked.append(result)
 linkfields=['dataset','tissue','original_tissue','sample','metadata_sample_id','subject_id','pathology_match','pathology_sample_id','pathology_tissue_source','tdp43_neuronal','tdp43_glial']+[x for x in fields if x not in ('dataset','tissue','original_tissue','sample')]
-write('tdp43_pathology_sample_matches.tsv',linked,linkfields)
-audit=Counter((r['tissue'],r['pathology_match']) for r in linked)
-write('tdp43_match_summary.tsv',[dict(tissue=t,match_status=status,n=n) for (t,status),n in sorted(audit.items())],['tissue','match_status','n'])
-# Select one sample per subject, tissue, gene and pathology-score type.
-# Among eligible repeats, retain the sample with greatest competing-junction depth; ties use sample ID. This avoids counting a subject more than once per panel.
-summary=[]; selected_samples=[]
-markers=[('unc13a','UNC13A','#487895'),('stmn2','STMN2','#df8855'),('poldip3','POLDIP3 (annotated skip)','#54a27b'),('synj2','SYNJ2','#9d72af'),('phf2','PHF2','#c6a345')]
-def event_reads(r,g):
- if g=='unc13a': return int(r['unc13a_128_reads'])+int(r['unc13a_178_reads'])
- if g=='poldip3': return int(r['poldip3_skip_reads'])
- return int(r[g+'_cryptic_reads'])
 for tissue in sorted({r['tissue'] for r in linked}):
  for cell in ['neuronal','glial']:
   eligible=[r for r in linked if r['tissue']==tissue and r['tdp43_'+cell] and r['subject_id']]
   if not eligible: continue
-  categories=['Absent','Sparse','Moderate','Frequent']; selected={}
-  for gene,label,color in markers:
-    candidates=defaultdict(list)
-    for r in eligible:
-      if r.get(gene+'_cryptic_fraction','')!='': candidates[r['subject_id']].append(r)
-    selected[gene]=[]
-    for subject,rr in sorted(candidates.items()):
-      # Do not silently pick between conflicting pathology groups.
-      if len({r['tdp43_'+cell] for r in rr})!=1:
-        issues.append([subject,f'conflicting {cell} pathology scores for {tissue}; excluded for {gene}']);continue
-      chosen=sorted(rr,key=lambda r:(-int(r[gene+'_junction_depth']),r['sample']))[0]
-      selected[gene].append(chosen)
-      selected_samples.append(dict(tissue=tissue,cell_type=cell,gene=gene,subject_id=subject,sample=chosen['sample'],category=chosen['tdp43_'+cell],junction_depth=chosen[gene+'_junction_depth'],pathology_match=chosen['pathology_match'],candidate_samples=len(rr)))
-  junction_key=('Junction coordinates (.junc):\n'
-    'UNC13A: cryptic chr19:17642541–17642844 + 17642591–17642844; canonical chr19:17641556–17642844\n'
-    'STMN2: cryptic chr8:79611214–79616821; canonical chr8:79611214–79636801\n'
-    'POLDIP3: annotated skip chr22:42599793–42602769; inclusion chr22:42599793–42601969\n'
-    'SYNJ2: cryptic chr6:158017290–158019983; canonical chr6:158017290–158028755\n'
-    'PHF2: cryptic chr9:93660560–93661347; canonical chr9:93660560–93662906')
-  def add_junction_key(fig): fig.text(.08,.015,junction_key,ha='left',va='bottom',fontsize=7,linespacing=1.3)
-  fig,ax=plt.subplots(figsize=(12,8));fig.subplots_adjust(bottom=.43);width=.15
-  for j,(gene,label,color) in enumerate(markers):
-    for i,category in enumerate(categories):
-      rr=[r for r in selected[gene] if r['tdp43_'+cell]==category];vals=[event_reads(r,gene) for r in rr];mean=statistics.mean(vals) if vals else None
-      summary.append(dict(tissue=tissue,cell_type=cell,category=category,gene=gene,n=len(vals),mean_cryptic_reads=mean if mean is not None else '',sum_cryptic_reads=sum(vals) if vals else ''))
-      if mean is not None: ax.bar(i+(j-2)*width,mean,width,color=color)
-  from matplotlib.patches import Patch
-  ax.set_xticks(range(4));ax.set_xticklabels(categories);ax.set_xlabel(cell.title()+' pTDP-43 inclusions');ax.set_ylabel('Mean event-supporting junction reads per subject');ax.set_title('Target ALS | '+tissue)
-  handles=[Patch(color=color,label=label+'  n: '+', '.join(c+' '+str(sum(r['tdp43_'+cell]==c for r in selected[gene])) for c in categories)) for gene,label,color in markers]
-  ax.legend(handles=handles,loc='upper center',bbox_to_anchor=(.5,-.13),frameon=False,fontsize=8,ncol=1)
-  add_junction_key(fig)
-  fig.savefig(out/f'target_ALS_{tissue}_tdp43_{cell}_mean_cryptic_reads.png',dpi=170,bbox_inches='tight');plt.close(fig)
-  fig,ax=plt.subplots(figsize=(12,8));fig.subplots_adjust(bottom=.43)
-  for j,(gene,label,color) in enumerate(markers):
-    for i,category in enumerate(categories):
-      vals=[100*float(r[gene+'_cryptic_fraction']) for r in selected[gene] if r['tdp43_'+cell]==category]
-      if vals: ax.boxplot([vals],positions=[i+(j-2)*width],widths=.12,patch_artist=True,boxprops=dict(facecolor=color,alpha=.65),medianprops=dict(color='black'),showfliers=True)
-  ax.set_xticks(range(4));ax.set_xticklabels(categories);ax.set_xlabel(cell.title()+' pTDP-43 inclusions');ax.set_ylabel('Event junction fraction (%)');ax.set_title('Target ALS | '+tissue)
-  ax.legend(handles=handles,loc='upper center',bbox_to_anchor=(.5,-.13),frameon=False,fontsize=8,ncol=1)
-  add_junction_key(fig)
-  fig.savefig(out/f'target_ALS_{tissue}_tdp43_{cell}_combined_splicing.png',dpi=170,bbox_inches='tight');plt.close(fig)
-  fig,ax=plt.subplots(figsize=(12,8));fig.subplots_adjust(bottom=.43)
-  for j,(gene,label,color) in enumerate(markers):
-    for i,category in enumerate(categories):
-      rr=[r for r in selected[gene] if r['tdp43_'+cell]==category]; positive=sum(event_reads(r,gene)>0 for r in rr)
-      ax.bar(i+(j-2)*width,len(rr)-positive,width,color=color,alpha=.25)
-      ax.bar(i+(j-2)*width,positive,width,bottom=len(rr)-positive,color=color)
-  ax.set_xticks(range(4));ax.set_xticklabels(categories);ax.set_xlabel(cell.title()+' pTDP-43 inclusions');ax.set_ylabel('Subjects (solid = event detected)');ax.set_title('Target ALS | '+tissue)
-  ax.legend(handles=handles,loc='upper center',bbox_to_anchor=(.5,-.13),frameon=False,fontsize=8,ncol=1)
-  add_junction_key(fig)
-  fig.savefig(out/f'target_ALS_{tissue}_tdp43_{cell}_combined_detection.png',dpi=170,bbox_inches='tight');plt.close(fig)
+  categories=['Absent','Sparse','Moderate','Frequent']
   # Existing circRNA summaries, now available separately for neuronal and glial scores.
   for metric,label,tag in [('median_span_bp','Median circRNA genomic span (bp)','span'),('median_exon_count','Median annotated exons per circRNA','exons')]:
     fig,axes=plt.subplots(1,3,figsize=(15,4),constrained_layout=True)
@@ -362,8 +284,6 @@ for tissue in sorted({r['tissue'] for r in linked}):
       ax.set_xticks(range(1,5));ax.set_xticklabels(labels,rotation=25,ha='right');ax.set_ylabel(label);ax.set_title({'all':'All detected','cqtl':'cQTL','circ_eqtl':'circ eQTL'}[subset])
     fig.suptitle('Target ALS | '+tissue+' — '+cell+' pTDP-43 inclusions')
     fig.savefig(out/f'target_ALS_{tissue}_tdp43_{cell}_{tag}.png',dpi=170);plt.close(fig)
-write('tdp43_selected_subject_samples.tsv',selected_samples,['tissue','cell_type','gene','subject_id','sample','category','junction_depth','pathology_match','candidate_samples'])
-write('tdp43_mean_cryptic_reads.tsv',summary,['tissue','cell_type','category','gene','n','mean_cryptic_reads','sum_cryptic_reads'])
 with (out/'issues.tsv').open('w') as f:
   w=csv.writer(f,delimiter='\t');w.writerow(['file','issue']);w.writerows(issues)
 print('Output:',out,'samples:',len(rows),'issues:',len(issues),'minimum circ reads:',mincirc,'minimum competing junction reads:',minj)
