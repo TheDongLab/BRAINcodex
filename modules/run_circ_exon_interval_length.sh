@@ -237,7 +237,7 @@ path_index=defaultdict(list); meta_index=defaultdict(set)
 if not pathology_path.is_file(): issues.append([str(pathology_path),'TDP-43 pathology CSV missing'])
 else:
   pathology,columns=read_csv_checked(pathology_path)
-  required={'Subject ID','Sample ID','Tissue Source','P Tdp 43 Inclusions Neuronal'}
+  required={'Subject ID','Sample ID','Tissue Source','P Tdp 43 Inclusions Neuronal','P Tdp 43 Inclusions Glial'}
   if not required.issubset(columns): issues.append([str(pathology_path),'missing pathology columns: '+', '.join(sorted(required-set(columns)))])
   else:
     for record in pathology:
@@ -259,7 +259,7 @@ def score(value):
   if value.upper() in missing_labels: return ''
   allowed={'absent':'Absent','sparse':'Sparse','moderate':'Moderate','frequent':'Frequent'}
   if value.lower() not in allowed:
-    issues.append([str(pathology_path),'Unrecognized neuronal inclusion score: '+value]); return ''
+    issues.append([str(pathology_path),'Unrecognized inclusion score: '+value]); return ''
   return allowed[value.lower()]
 linked=[]
 for row in rows:
@@ -277,45 +277,80 @@ for row in rows:
     elif len(candidates)==1: record=candidates[0];status='subject_tissue_different_specimen'
     elif len(candidates)>1: status='ambiguous_subject_tissue'
     else: status='no_pathology_for_subject_tissue'
-  result=dict(row);result.update(metadata_sample_id=next(iter(metadata_ids)) if len(metadata_ids)==1 else '',subject_id=next(iter(subjects)) if len(subjects)==1 else '',pathology_match=status,pathology_sample_id='',pathology_tissue_source='',tdp43_neuronal='')
+  result=dict(row);result.update(metadata_sample_id=next(iter(metadata_ids)) if len(metadata_ids)==1 else '',subject_id=next(iter(subjects)) if len(subjects)==1 else '',pathology_match=status,pathology_sample_id='',pathology_tissue_source='',tdp43_neuronal='',tdp43_glial='')
   if record:
-    result.update(pathology_sample_id=record['Sample ID'],pathology_tissue_source=record['Tissue Source'],tdp43_neuronal=score(record['P Tdp 43 Inclusions Neuronal']))
+    result.update(pathology_sample_id=record['Sample ID'],pathology_tissue_source=record['Tissue Source'],tdp43_neuronal=score(record['P Tdp 43 Inclusions Neuronal']),tdp43_glial=score(record['P Tdp 43 Inclusions Glial']))
   linked.append(result)
-linkfields=['dataset','tissue','original_tissue','sample','metadata_sample_id','subject_id','pathology_match','pathology_sample_id','pathology_tissue_source','tdp43_neuronal']+[x for x in fields if x not in ('dataset','tissue','original_tissue','sample')]
+linkfields=['dataset','tissue','original_tissue','sample','metadata_sample_id','subject_id','pathology_match','pathology_sample_id','pathology_tissue_source','tdp43_neuronal','tdp43_glial']+[x for x in fields if x not in ('dataset','tissue','original_tissue','sample')]
 write('tdp43_pathology_sample_matches.tsv',linked,linkfields)
 audit=Counter((r['tissue'],r['pathology_match']) for r in linked)
 write('tdp43_match_summary.tsv',[dict(tissue=t,match_status=status,n=n) for (t,status),n in sorted(audit.items())],['tissue','match_status','n'])
-# Plot neuronal inclusion scores in their ordinal order; missing scores are excluded.
-# Cryptic fractions, not detection based on a single read, preserve quantitative information.
+# Pathology scores are ordinal. Compare both genes within the same sample set,
+# requiring coverage for both so the groups and n are identical.
+summary=[]
 for tissue in sorted({r['tissue'] for r in linked}):
-  eligible=[r for r in linked if r['tissue']==tissue and r['tdp43_neuronal']]
+ for cell in ['neuronal','glial']:
+  eligible=[r for r in linked if r['tissue']==tissue and r['tdp43_'+cell]]
   if not eligible: continue
   categories=['Absent','Sparse','Moderate','Frequent']
-  fig,axes=plt.subplots(1,2,figsize=(11,4),constrained_layout=True)
-  for ax,gene in zip(axes,['unc13a','stmn2']):
-    positions=[]; distributions=[]; labels=[]
+  pairs=[r for r in eligible if r.get('unc13a_cryptic_fraction','')!='' and r.get('stmn2_cryptic_fraction','')!='']
+  grouped={category:[r for r in pairs if r['tdp43_'+cell]==category] for category in categories}
+  # Combined mean reads; zero reads included, missing junctions excluded.
+  fig,ax=plt.subplots(figsize=(9,5),constrained_layout=True)
+  width=.36
+  for offset,gene,color in [(-width/2,'unc13a','#467798'),(width/2,'stmn2','#e38a52')]:
     for i,category in enumerate(categories):
-      v=[100*float(r[gene+'_cryptic_fraction']) for r in eligible if r['tdp43_neuronal']==category and r.get(gene+'_cryptic_fraction','')!='']
-      if v: positions.append(i+1);distributions.append(v)
-      labels.append(f'{category}\n(n={len(v)})')
-    if distributions: ax.boxplot(distributions,positions=positions,showfliers=True)
-    else: ax.text(.5,.5,'No samples with sufficient junction coverage',ha='center',va='center',transform=ax.transAxes)
-    ax.set_xticks(range(1,len(categories)+1));ax.set_xticklabels(labels,rotation=25,ha='right');ax.set_ylabel('Cryptic junction fraction (%)');ax.set_title(gene.upper())
-  fig.suptitle('Target ALS | '+tissue+' — neuronal pTDP-43 inclusions')
-  fig.savefig(out/f'target_ALS_{tissue}_tdp43_neuronal_splicing.png',dpi=170);plt.close(fig)
+      rr=grouped[category]
+      vals=[(int(r['unc13a_128_reads'])+int(r['unc13a_178_reads']) if gene=='unc13a' else int(r['stmn2_cryptic_reads'])) for r in rr]
+      mean=statistics.mean(vals) if vals else None
+      summary.append(dict(tissue=tissue,cell_type=cell,category=category,gene=gene,n=len(vals),mean_cryptic_reads=mean if mean is not None else '',sum_cryptic_reads=sum(vals) if vals else ''))
+      if mean is not None:
+        ax.bar(i+offset,mean,width,color=color,label=gene.upper() if i==0 else None)
+        ax.annotate(f'{mean:.2f}',(i+offset,mean),xytext=(0,3),textcoords='offset points',ha='center',fontsize=8)
+      else: ax.text(i+offset,0,'n=0',ha='center',va='bottom',fontsize=8)
+  from matplotlib.patches import Patch
+  ax.legend(handles=[Patch(color='#467798',label='UNC13A'),Patch(color='#e38a52',label='STMN2')],frameon=False)
+  ax.set_xticks(range(4));ax.set_xticklabels([f'{c}\n(n={len(grouped[c])})' for c in categories]);ax.set_ylabel('Mean cryptic junction reads per sample');ax.set_xlabel(cell.title()+' pTDP-43 inclusions')
+  ax.set_title('Target ALS | '+tissue+' — paired evaluable samples')
+  fig.savefig(out/f'target_ALS_{tissue}_tdp43_{cell}_mean_cryptic_reads.png',dpi=170);plt.close(fig)
+  # Detection counts per gene, using the same paired samples.
+  fig,ax=plt.subplots(figsize=(9,5),constrained_layout=True)
+  for offset,gene in [(-width/2,'unc13a'),(width/2,'stmn2')]:
+    for i,category in enumerate(categories):
+      rr=grouped[category]; positive=sum(float(r[gene+'_cryptic_fraction'])>0 for r in rr)
+      ax.bar(i+offset,len(rr)-positive,width,color='#a9b9c5')
+      ax.bar(i+offset,positive,width,bottom=len(rr)-positive,color='#d78758')
+      if rr: ax.text(i+offset,len(rr),gene.upper(),rotation=90,ha='center',va='bottom',fontsize=7)
+  ax.legend(handles=[Patch(color='#a9b9c5',label='No cryptic reads'),Patch(color='#d78758',label='Cryptic reads detected')],frameon=False)
+  ax.set_xticks(range(4));ax.set_xticklabels([f'{c}\n(n={len(grouped[c])})' for c in categories]);ax.set_ylabel('Samples');ax.set_xlabel(cell.title()+' pTDP-43 inclusions')
+  ax.set_title('Target ALS | '+tissue+' — paired evaluable samples')
+  fig.savefig(out/f'target_ALS_{tissue}_tdp43_{cell}_combined_detection.png',dpi=170);plt.close(fig)
+  # Combined boxplots of cryptic junction fraction for the same paired samples.
+  fig,ax=plt.subplots(figsize=(9,5),constrained_layout=True)
+  for offset,gene,color in [(-width/2,'unc13a','#467798'),(width/2,'stmn2','#e38a52')]:
+    for i,category in enumerate(categories):
+      vals=[100*float(r[gene+'_cryptic_fraction']) for r in grouped[category]]
+      if vals:
+        ax.boxplot([vals],positions=[i+offset],widths=.27,patch_artist=True,boxprops=dict(facecolor=color,alpha=.65),medianprops=dict(color='black'),showfliers=True)
+  ax.legend(handles=[Patch(color='#467798',label='UNC13A'),Patch(color='#e38a52',label='STMN2')],frameon=False)
+  ax.set_xticks(range(4));ax.set_xticklabels([f'{c}\n(n={len(grouped[c])})' for c in categories]);ax.set_ylabel('Cryptic junction fraction (%)');ax.set_xlabel(cell.title()+' pTDP-43 inclusions')
+  ax.set_title('Target ALS | '+tissue+' — paired evaluable samples')
+  fig.savefig(out/f'target_ALS_{tissue}_tdp43_{cell}_combined_splicing.png',dpi=170);plt.close(fig)
+  # Existing circRNA summaries, now available separately for neuronal and glial scores.
   for metric,label,tag in [('median_span_bp','Median circRNA genomic span (bp)','span'),('median_exon_count','Median annotated exons per circRNA','exons')]:
     fig,axes=plt.subplots(1,3,figsize=(15,4),constrained_layout=True)
     for ax,subset in zip(axes,['all','cqtl','circ_eqtl']):
       positions=[]; distributions=[]; labels=[]
       for i,category in enumerate(categories):
-        v=[float(r[subset+'_'+metric]) for r in eligible if r['tdp43_neuronal']==category and r.get(subset+'_'+metric,'')!='']
+        v=[float(r[subset+'_'+metric]) for r in eligible if r['tdp43_'+cell]==category and r.get(subset+'_'+metric,'')!='']
         if v: positions.append(i+1);distributions.append(v)
         labels.append(f'{category}\n(n={len(v)})')
       if distributions: ax.boxplot(distributions,positions=positions,showfliers=True)
       else: ax.text(.5,.5,'No matched samples',ha='center',va='center',transform=ax.transAxes)
       ax.set_xticks(range(1,5));ax.set_xticklabels(labels,rotation=25,ha='right');ax.set_ylabel(label);ax.set_title({'all':'All detected','cqtl':'cQTL','circ_eqtl':'circ eQTL'}[subset])
-    fig.suptitle('Target ALS | '+tissue+' — neuronal pTDP-43 inclusions')
-    fig.savefig(out/f'target_ALS_{tissue}_tdp43_neuronal_{tag}.png',dpi=170);plt.close(fig)
+    fig.suptitle('Target ALS | '+tissue+' — '+cell+' pTDP-43 inclusions')
+    fig.savefig(out/f'target_ALS_{tissue}_tdp43_{cell}_{tag}.png',dpi=170);plt.close(fig)
+write('tdp43_mean_cryptic_reads.tsv',summary,['tissue','cell_type','category','gene','n','mean_cryptic_reads','sum_cryptic_reads'])
 with (out/'issues.tsv').open('w') as f:
   w=csv.writer(f,delimiter='\t');w.writerow(['file','issue']);w.writerows(issues)
 print('Output:',out,'samples:',len(rows),'issues:',len(issues),'minimum circ reads:',mincirc,'minimum competing junction reads:',minj)
