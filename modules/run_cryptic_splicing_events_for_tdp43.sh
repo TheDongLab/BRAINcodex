@@ -8,6 +8,9 @@
 
 set -euo pipefail
 module purge
+
+module load R
+
 unset PYTHONPATH PYTHONHOME
 export PYTHONNOUSERSITE=1
 module load deepTools
@@ -108,9 +111,7 @@ for dataset,tissue in sorted({(r['dataset'],r['tissue']) for r in rows}):
     else:
       ax.axis('off');ax.text(.5,.5,'No samples with sufficient junction coverage',ha='center',va='center',wrap=True,transform=ax.transAxes);ax.set_title(gene.upper()+' | n=0')
   fig.suptitle(dataset+' | '+tissue+' — cryptic splicing');fig.savefig(out/f'{dataset}_{tissue}_splicing_histogram.png',dpi=170);plt.close(fig)
-# Link RNA samples to TDP-43 pathology using the RNA metadata subject ID and
-# the same tissue region. An exact pathology sample ID is preferred. Subject +
-# region matches may represent different specimens and are labelled accordingly.
+# Link RNA samples to TDP-43 pathology using the RNA metadata subject ID and the same tissue region. An exact pathology sample ID is preferred. Subject + region matches may represent different specimens and are labelled accordingly.
 def canonical_pathology_tissue(value):
   text=re.sub(r'[^a-z0-9]+',' ',str(value).lower()).strip()
   if 'cerebell' in text: return 'Cerebellum'
