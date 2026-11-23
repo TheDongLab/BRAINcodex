@@ -245,6 +245,68 @@ for tissue in sorted({r['tissue'] for r in linked}):
   fig.savefig(out/f'target_ALS_{tissue}_tdp43_{cell}_combined_detection.png',dpi=170,bbox_inches='tight');plt.close(fig)
 write('tdp43_selected_subject_samples.tsv',selected_samples,['tissue','original_tissue','cell_type','gene','subject_id','sample','category','junction_depth','pathology_match','candidate_samples'])
 write('tdp43_mean_cryptic_reads.tsv',summary,['tissue','cell_type','category','gene','n','mean_cryptic_reads','sum_cryptic_reads'])
+# Brown-style exploratory burden: standardize each gene within dataset/tissue
+# across all measured RNA samples, irrespective of pathology; sum only complete
+# four-event profiles. These cohort-derived scores are descriptive, not a
+# held-out prediction model. Means and sample SDs are exported for audit.
+genes=['unc13a','stmn2','synj2','phf2']
+reference=[]; score_rows=[]
+path_lookup={(r['dataset'],r['tissue'],r['original_tissue'],r['sample']):r for r in linked}
+for dataset,tissue in sorted({(r['dataset'],r['tissue']) for r in rows}):
+  rr=[r for r in rows if r['dataset']==dataset and r['tissue']==tissue]
+  params={}
+  for gene in genes:
+    values=[float(r[gene+'_cryptic_fraction']) for r in rr if r.get(gene+'_cryptic_fraction','')!='']
+    mean=statistics.mean(values) if values else None
+    sd=statistics.stdev(values) if len(values)>=2 else None
+    usable=sd is not None and math.isfinite(sd) and sd>0
+    params[gene]=(mean,sd,usable)
+    reference.append(dict(dataset=dataset,tissue=tissue,gene=gene,n_reference=len(values),mean_fraction=mean if mean is not None else '',sd_fraction=sd if sd is not None else '',status='ok' if usable else ('no_values' if not values else 'insufficient_or_zero_variance')))
+  for r in rr:
+    matched=path_lookup.get((dataset,tissue,r['original_tissue'],r['sample']),{})
+    rec=dict(dataset=dataset,tissue=tissue,original_tissue=r['original_tissue'],sample=r['sample'],subject_id=matched.get('subject_id',''),pathology_match=matched.get('pathology_match',''),tdp43_neuronal=matched.get('tdp43_neuronal',''),tdp43_glial=matched.get('tdp43_glial',''))
+    zs=[]; missing=[]
+    for gene in genes:
+      fraction=r.get(gene+'_cryptic_fraction',''); mean,sd,usable=params[gene]
+      z=(float(fraction)-mean)/sd if fraction!='' and usable else None
+      rec[gene+'_junction_depth']=r.get(gene+'_junction_depth','')
+      rec[gene+'_cryptic_fraction']=fraction
+      rec[gene+'_z']=z if z is not None else ''
+      if z is None: missing.append(gene)
+      else: zs.append(z)
+    rec.update(n_events=len(zs),missing_events=','.join(missing),tdp43_lof_zsum=sum(zs) if len(zs)==4 else '',tdp43_lof_zmean=sum(zs)/4 if len(zs)==4 else '',score_status='complete' if len(zs)==4 else 'incomplete')
+    score_rows.append(rec)
+write('tdp43_lof_zscore_reference.tsv',reference,['dataset','tissue','gene','n_reference','mean_fraction','sd_fraction','status'])
+score_fields=['dataset','tissue','original_tissue','sample','subject_id','pathology_match','tdp43_neuronal','tdp43_glial']+[x for g in genes for x in (g+'_junction_depth',g+'_cryptic_fraction',g+'_z')]+['n_events','missing_events','tdp43_lof_zsum','tdp43_lof_zmean','score_status']
+write('tdp43_lof_zscores.tsv',score_rows,score_fields)
+# Show the score distribution across all samples and by neuronal pathology.
+# Each point is an RNA sample; multiple samples may come from one subject.
+import random
+rng=random.Random(43)
+for dataset,tissue in sorted({(r['dataset'],r['tissue']) for r in score_rows}):
+  cohort=[r for r in score_rows if r['dataset']==dataset and r['tissue']==tissue]
+  complete=[r for r in cohort if r['score_status']=='complete']
+  fig,axes=plt.subplots(1,2,figsize=(11,4.5),constrained_layout=True)
+  vals=[r['tdp43_lof_zsum'] for r in complete]
+  if vals:
+    axes[0].hist(vals,bins=min(20,max(5,int(math.sqrt(len(vals))))),color='#487895',edgecolor='white')
+    axes[0].axvline(0,color='black',lw=1,ls='--')
+  else: axes[0].text(.5,.5,'No complete four-event scores',ha='center',va='center',transform=axes[0].transAxes)
+  axes[0].set_xlabel('Sum of four event Z scores');axes[0].set_ylabel('RNA samples')
+  axes[0].set_title(f'Complete scores: {len(complete)}/{len(cohort)} samples')
+  categories=['Absent','Sparse','Moderate','Frequent']
+  has_groups=False
+  for i,category in enumerate(categories):
+    v=[r['tdp43_lof_zsum'] for r in complete if r['tdp43_neuronal']==category]
+    if v:
+      has_groups=True
+      axes[1].boxplot([v],positions=[i],widths=.5,showfliers=False,patch_artist=True,boxprops=dict(facecolor='#9bbacb'),medianprops=dict(color='black'))
+      axes[1].scatter([i+rng.uniform(-.12,.12) for _ in v],v,s=14,alpha=.55,color='#31566c')
+    axes[1].text(i,1.02,'n='+str(len(v)),ha='center',transform=axes[1].get_xaxis_transform(),fontsize=9)
+  if not has_groups: axes[1].text(.5,.5,'No matched neuronal pathology for complete scores',ha='center',va='center',transform=axes[1].transAxes,wrap=True)
+  axes[1].set_xticks(range(4));axes[1].set_xticklabels(categories,rotation=20);axes[1].set_xlabel('Neuronal pTDP-43 inclusions');axes[1].set_ylabel('Sum of four event Z scores')
+  axes[1].axhline(0,color='black',lw=.8,ls='--');fig.suptitle(dataset+' | '+tissue+' — exploratory TDP-43 cryptic burden')
+  fig.savefig(out/f'{dataset}_{tissue}_tdp43_lof_zscore.png',dpi=170);plt.close(fig)
 with (out/'issues.tsv').open('w') as f:
   w=csv.writer(f,delimiter='\t');w.writerow(['file','issue']);w.writerows(issues)
 print('Output:',out,'samples:',len(rows),'issues:',len(issues),'minimum circ reads:',mincirc,'minimum competing junction reads:',minj)
