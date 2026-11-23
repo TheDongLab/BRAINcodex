@@ -215,7 +215,9 @@ for dataset,tissue in sorted({(r['dataset'],r['tissue']) for r in rows}):
         ax.set_xlabel(label);ax.set_ylabel('Samples');ax.legend(fontsize=7,frameon=False)
     fig.suptitle(dataset+' | '+tissue+' — sample distributions');fig.savefig(out/f'{dataset}_{tissue}_{tag}_histogram.png',dpi=170);plt.close(fig)
 write('correlations.tsv',stats,['dataset','tissue','gene','subset','metric','n','spearman_rho','p_value'])
-# Link RNA samples to TDP-43 pathology using the RNA metadata subject ID and the same tissue region. An exact pathology sample ID is preferred. Subject + region matches may represent different specimens and are labelled accordingly.
+# Link RNA samples to TDP-43 pathology using the RNA metadata subject ID and
+# the same tissue region. An exact pathology sample ID is preferred. Subject +
+# region matches may represent different specimens and are labelled accordingly.
 def canonical_pathology_tissue(value):
   text=re.sub(r'[^a-z0-9]+',' ',str(value).lower()).strip()
   if 'cerebell' in text: return 'Cerebellum'
@@ -225,6 +227,7 @@ def canonical_pathology_tissue(value):
   if ('spinal' in text or 'cord' in text) and ('lumbar' in text or 'lumbosacral' in text): return 'Lumbar_Spinal_Cord'
   return ''
 def normid(value): return str(value or '').strip().upper()
+def normsample(value): return normid(value).replace('_','-')
 def read_csv_checked(path):
   with path.open(newline='',encoding='utf-8-sig') as f:
     reader=csv.DictReader(f)
@@ -249,7 +252,7 @@ else:
   else:
     for record in meta:
       sample=normid(record.get(samplecol)); subject=normid(record.get(subjectcol))
-      if sample and subject: meta_index[sample].add(subject)
+      if sample and subject: meta_index[normsample(sample)].add((sample,subject))
 missing_labels={'','N/D','NA','N/A','NOT AVAILABLE','UNKNOWN','NOT DONE'}
 def score(value):
   value=str(value or '').strip()
@@ -261,22 +264,24 @@ def score(value):
 linked=[]
 for row in rows:
   if row['dataset']!='target_ALS': continue
-  sample=normid(row['sample']); subjects=meta_index.get(sample,set()); status=''; record=None
-  if not subjects: status='rna_sample_not_in_metadata'
+  sample=normid(row['sample']); entries=meta_index.get(normsample(sample),set()); status=''; record=None
+  subjects={subject for metadata_sample,subject in entries}; metadata_ids={metadata_sample for metadata_sample,subject in entries}
+  if not entries: status='rna_sample_not_in_metadata'
   elif len(subjects)>1: status='ambiguous_rna_subject'
+  elif len(metadata_ids)>1: status='ambiguous_normalized_rna_sample'
   else:
     subject=next(iter(subjects)); candidates=path_index.get((subject,row['tissue']),[])
-    exact=[r for r in candidates if normid(r['Sample ID'])==sample]
+    exact=[r for r in candidates if normsample(r['Sample ID'])==normsample(sample)]
     if len(exact)==1: record=exact[0];status='exact_sample'
     elif len(exact)>1: status='ambiguous_exact_sample'
     elif len(candidates)==1: record=candidates[0];status='subject_tissue_different_specimen'
     elif len(candidates)>1: status='ambiguous_subject_tissue'
     else: status='no_pathology_for_subject_tissue'
-  result=dict(row);result.update(subject_id=next(iter(subjects)) if len(subjects)==1 else '',pathology_match=status,pathology_sample_id='',pathology_tissue_source='',tdp43_neuronal='')
+  result=dict(row);result.update(metadata_sample_id=next(iter(metadata_ids)) if len(metadata_ids)==1 else '',subject_id=next(iter(subjects)) if len(subjects)==1 else '',pathology_match=status,pathology_sample_id='',pathology_tissue_source='',tdp43_neuronal='')
   if record:
     result.update(pathology_sample_id=record['Sample ID'],pathology_tissue_source=record['Tissue Source'],tdp43_neuronal=score(record['P Tdp 43 Inclusions Neuronal']))
   linked.append(result)
-linkfields=['dataset','tissue','original_tissue','sample','subject_id','pathology_match','pathology_sample_id','pathology_tissue_source','tdp43_neuronal']+[x for x in fields if x not in ('dataset','tissue','original_tissue','sample')]
+linkfields=['dataset','tissue','original_tissue','sample','metadata_sample_id','subject_id','pathology_match','pathology_sample_id','pathology_tissue_source','tdp43_neuronal']+[x for x in fields if x not in ('dataset','tissue','original_tissue','sample')]
 write('tdp43_pathology_sample_matches.tsv',linked,linkfields)
 audit=Counter((r['tissue'],r['pathology_match']) for r in linked)
 write('tdp43_match_summary.tsv',[dict(tissue=t,match_status=status,n=n) for (t,status),n in sorted(audit.items())],['tissue','match_status','n'])
