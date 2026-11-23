@@ -248,3 +248,44 @@ with (out/'issues.tsv').open('w') as f:
   w=csv.writer(f,delimiter='\t');w.writerow(['file','issue']);w.writerows(issues)
 print('Output:',out,'samples:',len(rows),'issues:',len(issues),'minimum circ reads:',mincirc,'minimum competing junction reads:',minj)
 PYTHON
+
+# Four neuronal pathology groups using the unmodified LeafViz plotting script.
+PLOT_SCRIPT="${PLOT_SCRIPT:-$HOME/donglab/pipelines/scripts/QTL/plot_sQTL_leafviz_PSI.R}"
+TDP_ALIGNED="${TDP_ALIGNED:-$TARGET_ROOT/aligned_rnaseq_tdp43_by_subject.csv}"
+RSCRIPT="${RSCRIPT:-Rscript}"
+PLOT_OUTDIR="${PLOT_OUTDIR:-$OUTDIR/leafviz_tdp43}"
+mkdir -p "$PLOT_OUTDIR"
+[[ -r "$PLOT_SCRIPT" ]] || { echo "Missing plotting script: $PLOT_SCRIPT" >&2; exit 1; }
+[[ -r "$TDP_ALIGNED" ]] || { echo "Missing aligned pathology table: $TDP_ALIGNED" >&2; exit 1; }
+command -v "$RSCRIPT" >/dev/null || { echo 'Rscript unavailable; load the appropriate R module' >&2; exit 1; }
+# PSI-file anchor endpoints use .junc end + 1, as documented for UNC13A
+# in the plotting script. Override these if your PSI files use another convention.
+UNC13A_ANCHOR="${UNC13A_ANCHOR:-chr19:-:17641556-17642845}"
+STMN2_ANCHOR="${STMN2_ANCHOR:-chr8:+:79611214-79636802}"
+SYNJ2_ANCHOR="${SYNJ2_ANCHOR:-chr6:+:158017290-158028756}"
+PHF2_ANCHOR="${PHF2_ANCHOR:-chr9:+:93660560-93662907}"
+plot_one() {
+  local tissue="$1" tissue_regex="$2" gene="$3" anchor="$4"
+  local prefix="target_ALS_${tissue}_${gene}_tdp43_neuronal"
+  echo "Plotting $gene in $tissue"
+  "$RSCRIPT" "$PLOT_SCRIPT" --group-by tdp43 \
+    --tissue "$tissue" --tissue-regex "$tissue_regex" \
+    --anchor "$anchor" --gene "$gene" --metadata "$TARGET_METADATA" \
+    --data-root "$TARGET_ROOT" --gtf "$GTF" --tdp43 "$TDP_ALIGNED" \
+    --pathology "$TDP_PATHOLOGY" --outdir "$PLOT_OUTDIR" --prefix "$prefix"
+}
+# Default to the illustrated tissue; override PLOT_TISSUES with a space-separated list.
+for tissue in ${PLOT_TISSUES:-Lumbar_Spinal_Cord}; do
+  case "$tissue" in
+    Lumbar_Spinal_Cord) tissue_regex='lumbar|lumbosacral' ;;
+    Cervical_Spinal_Cord) tissue_regex='cervical' ;;
+    Motor_Cortex) tissue_regex='motor|BA4' ;;
+    Frontal_Cortex) tissue_regex='frontal' ;;
+    Cerebellum) tissue_regex='cerebell' ;;
+    *) echo "Unsupported plot tissue: $tissue" >&2; exit 1 ;;
+  esac
+  plot_one "$tissue" "$tissue_regex" UNC13A "$UNC13A_ANCHOR"
+  plot_one "$tissue" "$tissue_regex" STMN2 "$STMN2_ANCHOR"
+  plot_one "$tissue" "$tissue_regex" SYNJ2 "$SYNJ2_ANCHOR"
+  plot_one "$tissue" "$tissue_regex" PHF2 "$PHF2_ANCHOR"
+done
