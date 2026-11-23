@@ -202,7 +202,7 @@ for tissue in sorted({r['tissue'] for r in linked}):
         issues.append([subject,f'conflicting {cell} pathology scores for {tissue}; excluded for {gene}']);continue
       chosen=sorted(rr,key=lambda r:(-int(r[gene+'_junction_depth']),r['sample']))[0]
       selected[gene].append(chosen)
-      selected_samples.append(dict(tissue=tissue,cell_type=cell,gene=gene,subject_id=subject,sample=chosen['sample'],category=chosen['tdp43_'+cell],junction_depth=chosen[gene+'_junction_depth'],pathology_match=chosen['pathology_match'],candidate_samples=len(rr)))
+      selected_samples.append(dict(tissue=tissue,original_tissue=chosen['original_tissue'],cell_type=cell,gene=gene,subject_id=subject,sample=chosen['sample'],category=chosen['tdp43_'+cell],junction_depth=chosen[gene+'_junction_depth'],pathology_match=chosen['pathology_match'],candidate_samples=len(rr)))
   junction_key=('Junction coordinates (.junc):\n'
     'UNC13A: cryptic chr19:17642541–17642844 + 17642591–17642844; canonical chr19:17641556–17642844\n'
     'STMN2: cryptic chr8:79611214–79616821; canonical chr8:79611214–79636801\n'
@@ -243,7 +243,7 @@ for tissue in sorted({r['tissue'] for r in linked}):
   ax.legend(handles=handles,loc='upper center',bbox_to_anchor=(.5,-.13),frameon=False,fontsize=8,ncol=1)
   add_junction_key(fig)
   fig.savefig(out/f'target_ALS_{tissue}_tdp43_{cell}_combined_detection.png',dpi=170,bbox_inches='tight');plt.close(fig)
-write('tdp43_selected_subject_samples.tsv',selected_samples,['tissue','cell_type','gene','subject_id','sample','category','junction_depth','pathology_match','candidate_samples'])
+write('tdp43_selected_subject_samples.tsv',selected_samples,['tissue','original_tissue','cell_type','gene','subject_id','sample','category','junction_depth','pathology_match','candidate_samples'])
 write('tdp43_mean_cryptic_reads.tsv',summary,['tissue','cell_type','category','gene','n','mean_cryptic_reads','sum_cryptic_reads'])
 with (out/'issues.tsv').open('w') as f:
   w=csv.writer(f,delimiter='\t');w.writerow(['file','issue']);w.writerows(issues)
@@ -251,7 +251,8 @@ print('Output:',out,'samples:',len(rows),'issues:',len(issues),'minimum circ rea
 PYTHON
 
 # LeafViz-style diagrams derived from exactly the bar chart's selected samples.
-# Reference: plot_sQTL_leafviz_PSI.R. This self-contained implementation uses .junc competing-junction fractions, not that script's LeafCutter PSI values.
+# Reference: plot_sQTL_leafviz_PSI.R. This self-contained implementation uses
+# .junc competing-junction fractions, not that script's LeafCutter PSI values.
 python - <<'MATCHED_PLOTS'
 import csv, os, math
 from collections import defaultdict
@@ -262,14 +263,15 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import FancyArrowPatch
 
 root=Path(os.environ['OUTDIR'])
-out=root/'leafviz_tdp43_matched'; out.mkdir(parents=True,exist_ok=True)
+out=root/'leafviz_tdp43'; out.mkdir(parents=True,exist_ok=True)
 def read(name):
     with (root/name).open(newline='') as f: return list(csv.DictReader(f,delimiter='\t'))
 linked=read('tdp43_pathology_sample_matches.tsv')
 selected=read('tdp43_selected_subject_samples.tsv')
+if selected and 'original_tissue' not in selected[0]: raise ValueError('Selection table predates original_tissue fix; rerun the full analysis to regenerate it.')
 lookup={}
 for r in linked:
-    key=(r['tissue'],r['sample'])
+    key=(r['tissue'],r['original_tissue'],r['sample'])
     if key in lookup: raise ValueError('Duplicate pathology sample key: '+str(key))
     lookup[key]=r
 spec={
@@ -280,7 +282,7 @@ spec={
 categories=['Absent','Sparse','Moderate','Frequent']
 groups=defaultdict(list)
 for sel in selected:
-    key=(sel['tissue'],sel['sample'])
+    key=(sel['tissue'],sel['original_tissue'],sel['sample'])
     if key not in lookup: raise ValueError('Selected sample not found: '+str(key))
     r=lookup[key]; gene=sel['gene']; cell=sel['cell_type']
     if r['subject_id']!=sel['subject_id'] or r['tdp43_'+cell]!=sel['category']:
