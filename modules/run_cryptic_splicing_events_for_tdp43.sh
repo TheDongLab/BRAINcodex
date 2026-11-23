@@ -250,43 +250,81 @@ with (out/'issues.tsv').open('w') as f:
 print('Output:',out,'samples:',len(rows),'issues:',len(issues),'minimum circ reads:',mincirc,'minimum competing junction reads:',minj)
 PYTHON
 
-# Four neuronal pathology groups using the unmodified LeafViz plotting script.
-PLOT_SCRIPT="${PLOT_SCRIPT:-$HOME/donglab/pipelines/scripts/QTL/plot_sQTL_leafviz_PSI.R}"
-TDP_ALIGNED="${TDP_ALIGNED:-$TARGET_ROOT/aligned_rnaseq_tdp43_by_subject.csv}"
-RSCRIPT="${RSCRIPT:-Rscript}"
-PLOT_OUTDIR="${PLOT_OUTDIR:-$OUTDIR/leafviz_tdp43}"
-mkdir -p "$PLOT_OUTDIR"
-[[ -r "$PLOT_SCRIPT" ]] || { echo "Missing plotting script: $PLOT_SCRIPT" >&2; exit 1; }
-[[ -r "$TDP_ALIGNED" ]] || { echo "Missing aligned pathology table: $TDP_ALIGNED" >&2; exit 1; }
-command -v "$RSCRIPT" >/dev/null || { echo 'Rscript unavailable; load the appropriate R module' >&2; exit 1; }
-# PSI-file anchor endpoints use .junc end + 1, as documented for UNC13A
-# in the plotting script. Override these if your PSI files use another convention.
-UNC13A_ANCHOR="${UNC13A_ANCHOR:-chr19:-:17641556-17642845}"
-STMN2_ANCHOR="${STMN2_ANCHOR:-chr8:+:79611214-79636802}"
-SYNJ2_ANCHOR="${SYNJ2_ANCHOR:-chr6:+:158017290-158028756}"
-PHF2_ANCHOR="${PHF2_ANCHOR:-chr9:+:93660560-93662907}"
-plot_one() {
-  local tissue="$1" tissue_regex="$2" gene="$3" anchor="$4"
-  local prefix="target_ALS_${tissue}_${gene}_tdp43_neuronal"
-  echo "Plotting $gene in $tissue"
-  "$RSCRIPT" "$PLOT_SCRIPT" --group-by tdp43 \
-    --tissue "$tissue" --tissue-regex "$tissue_regex" \
-    --anchor "$anchor" --gene "$gene" --metadata "$TARGET_METADATA" \
-    --data-root "$TARGET_ROOT" --gtf "$GTF" --tdp43 "$TDP_ALIGNED" \
-    --pathology "$TDP_PATHOLOGY" --outdir "$PLOT_OUTDIR" --prefix "$prefix"
-}
-# Default to the illustrated tissue; override PLOT_TISSUES with a space-separated list.
-for tissue in ${PLOT_TISSUES:-Lumbar_Spinal_Cord}; do
-  case "$tissue" in
-    Lumbar_Spinal_Cord) tissue_regex='lumbar|lumbosacral' ;;
-    Cervical_Spinal_Cord) tissue_regex='cervical' ;;
-    Motor_Cortex) tissue_regex='motor|BA4' ;;
-    Frontal_Cortex) tissue_regex='frontal' ;;
-    Cerebellum) tissue_regex='cerebell' ;;
-    *) echo "Unsupported plot tissue: $tissue" >&2; exit 1 ;;
-  esac
-  plot_one "$tissue" "$tissue_regex" UNC13A "$UNC13A_ANCHOR"
-  plot_one "$tissue" "$tissue_regex" STMN2 "$STMN2_ANCHOR"
-  plot_one "$tissue" "$tissue_regex" SYNJ2 "$SYNJ2_ANCHOR"
-  plot_one "$tissue" "$tissue_regex" PHF2 "$PHF2_ANCHOR"
-done
+# LeafViz-style diagrams derived from exactly the bar chart's selected samples.
+# Reference: plot_sQTL_leafviz_PSI.R. This self-contained implementation uses .junc competing-junction fractions, not that script's LeafCutter PSI values.
+python - <<'MATCHED_PLOTS'
+import csv, os, math
+from collections import defaultdict
+from pathlib import Path
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from matplotlib.patches import FancyArrowPatch
+
+root=Path(os.environ['OUTDIR'])
+out=root/'leafviz_tdp43_matched'; out.mkdir(parents=True,exist_ok=True)
+def read(name):
+    with (root/name).open(newline='') as f: return list(csv.DictReader(f,delimiter='\t'))
+linked=read('tdp43_pathology_sample_matches.tsv')
+selected=read('tdp43_selected_subject_samples.tsv')
+lookup={}
+for r in linked:
+    key=(r['tissue'],r['sample'])
+    if key in lookup: raise ValueError('Duplicate pathology sample key: '+str(key))
+    lookup[key]=r
+spec={
+ 'unc13a':('UNC13A','chr19:-', [('cryptic 128','unc13a_128_reads',17642541,17642844),('cryptic 178','unc13a_178_reads',17642591,17642844),('canonical','unc13a_skip_reads',17641556,17642844)]),
+ 'stmn2':('STMN2','chr8:+',[('cryptic','stmn2_cryptic_reads',79611214,79616821),('canonical','stmn2_canonical_reads',79611214,79636801)]),
+ 'synj2':('SYNJ2','chr6:+',[('cryptic','synj2_cryptic_reads',158017290,158019983),('canonical','synj2_canonical_reads',158017290,158028755)]),
+ 'phf2':('PHF2','chr9:+',[('cryptic','phf2_cryptic_reads',93660560,93661347),('canonical','phf2_canonical_reads',93660560,93662906)])}
+categories=['Absent','Sparse','Moderate','Frequent']
+groups=defaultdict(list)
+for sel in selected:
+    key=(sel['tissue'],sel['sample'])
+    if key not in lookup: raise ValueError('Selected sample not found: '+str(key))
+    r=lookup[key]; gene=sel['gene']; cell=sel['cell_type']
+    if r['subject_id']!=sel['subject_id'] or r['tdp43_'+cell]!=sel['category']:
+        raise ValueError('Selected sample identity or pathology mismatch: '+str(key))
+    if not r[gene+'_junction_depth'] or int(r[gene+'_junction_depth'])!=int(sel['junction_depth']):
+        raise ValueError('Selected sample depth mismatch: '+str(key))
+    groups[(sel['tissue'],cell,gene,sel['category'])].append((sel,r))
+
+for tissue,cell,gene in sorted({(k[0],k[1],k[2]) for k in groups}):
+    label,chrom,junctions=spec[gene]
+    positions=sorted({x for j in junctions for x in j[2:]})
+    compressed=[0.0]
+    for a,b in zip(positions,positions[1:]): compressed.append(compressed[-1]+math.log1p(b-a))
+    span=compressed[-1] or 1
+    xmap={p:0.08+0.84*x/span for p,x in zip(positions,compressed)}
+    fig,axes=plt.subplots(4,1,figsize=(12,12)); fig.subplots_adjust(top=.90,bottom=.15,hspace=.30)
+    rows=[]
+    for ax,category in zip(axes,categories):
+        items=groups.get((tissue,cell,gene,category),[]); n=len(items)
+        ax.set_xlim(0,1);ax.set_ylim(-.65,.72);ax.axis('off')
+        ax.plot([.04,.96],[0,0],color='black',lw=1.3)
+        ax.text(.01,.5,category+' (n='+str(n)+')',transform=ax.transAxes,ha='left',va='center',fontsize=11,fontweight='bold')
+        for idx,(name,col,start,end) in enumerate(junctions):
+            vals=[]
+            for sel,r in items:
+                depth=int(r[gene+'_junction_depth']); reads=int(r[col]); vals.append(reads/depth)
+                rows.append({'tissue':tissue,'cell_type':cell,'gene':label,'category':category,'subject_id':sel['subject_id'],'sample':sel['sample'],'pathology_match':sel['pathology_match'],'junction':name,'coordinates':chrom+':'+str(start)+'-'+str(end),'junction_reads':reads,'competing_depth':depth,'junction_fraction':reads/depth})
+            mean=sum(vals)/n if n else None
+            color='#cc3a36' if name=='canonical' else '#2685df'
+            y=.32 if name!='canonical' else -.36
+            if name=='cryptic 178': y=.50
+            arc=FancyArrowPatch((xmap[start],0),(xmap[end],0),connectionstyle='arc3,rad='+str(-.5 if y>0 else .5),arrowstyle='-',color=color,linewidth=.7 if mean is None else 1+8*mean,linestyle=':' if mean is None else '-',alpha=.95)
+            ax.add_patch(arc)
+            text=name+': '+('NA (n=0)' if mean is None else f'{100*mean:.2f}% (n={n})')
+            ax.text((xmap[start]+xmap[end])/2,y,text,ha='center',va='center',fontsize=9,bbox=dict(facecolor='white',edgecolor='none',alpha=.9))
+        if not n: ax.text(.5,.85,'No eligible subjects',transform=ax.transAxes,ha='center',fontsize=9)
+    fig.suptitle(label+' | '+tissue+' | '+cell+' pTDP-43\nMean per-subject competing-junction fraction; same subjects as bar chart',fontsize=14)
+    key='  |  '.join(f'{name}: {chrom}:{a}-{b}' for name,_,a,b in junctions)
+    fig.text(.05,.055,'Coordinates are .junc coordinates. '+key+'\nBlue = cryptic-supporting junction; red = canonical junction. Lines are junctions, not exon structures.',fontsize=8,wrap=True)
+    prefix=f'target_ALS_{tissue}_{label}_tdp43_{cell}_matched'
+    for ext in ('png','pdf','svg'): fig.savefig(out/(prefix+'.'+ext),dpi=180,bbox_inches='tight')
+    plt.close(fig)
+    with (out/(prefix+'.subject_junctions.tsv')).open('w',newline='') as f:
+        fields=['tissue','cell_type','gene','category','subject_id','sample','pathology_match','junction','coordinates','junction_reads','competing_depth','junction_fraction']
+        writer=csv.DictWriter(f,fieldnames=fields,delimiter='\t');writer.writeheader();writer.writerows(rows)
+print('Matched splicing diagrams:',out)
+MATCHED_PLOTS
