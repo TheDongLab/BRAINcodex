@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH --job-name=rbp_junction_map
 #SBATCH --partition=day
-#SBATCH --cpus-per-task=2
-#SBATCH --mem=48G
+#SBATCH --cpus-per-task=1
+#SBATCH --mem=200G
 #SBATCH --time=23:00:00
 #SBATCH --output=/home/zw529/donglab/data/target_ALS/QTL/rbp_junction_map.out
 #SBATCH --error=/home/zw529/donglab/data/target_ALS/QTL/rbp_junction_map.err
