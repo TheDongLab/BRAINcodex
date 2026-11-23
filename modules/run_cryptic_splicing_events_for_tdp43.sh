@@ -250,83 +250,65 @@ with (out/'issues.tsv').open('w') as f:
 print('Output:',out,'samples:',len(rows),'issues:',len(issues),'minimum circ reads:',mincirc,'minimum competing junction reads:',minj)
 PYTHON
 
-# LeafViz-style diagrams derived from exactly the bar chart's selected samples.
-# Reference: plot_sQTL_leafviz_PSI.R. This self-contained implementation uses
-# .junc competing-junction fractions, not that script's LeafCutter PSI values.
-python - <<'MATCHED_PLOTS'
-import csv, os, math
+# Matched LeafViz plots: reuse the original R plotting code with .junc fractions.
+export PLOT_SCRIPT="${PLOT_SCRIPT:-$HOME/donglab/pipelines/scripts/QTL/plot_sQTL_leafviz_PSI.R}"
+export PLOT_OUTDIR="${PLOT_OUTDIR:-$OUTDIR/leafviz_tdp43}"
+mkdir -p "$PLOT_OUTDIR"
+[[ -r "$PLOT_SCRIPT" ]] || { echo "Missing LeafViz script: $PLOT_SCRIPT" >&2; exit 1; }
+python - <<'MATCHED_DATA'
+import csv, os
 from collections import defaultdict
 from pathlib import Path
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-from matplotlib.patches import FancyArrowPatch
-
-root=Path(os.environ['OUTDIR'])
-out=root/'leafviz_tdp43'; out.mkdir(parents=True,exist_ok=True)
+root=Path(os.environ['OUTDIR']); out=Path(os.environ['PLOT_OUTDIR'])
 def read(name):
-    with (root/name).open(newline='') as f: return list(csv.DictReader(f,delimiter='\t'))
-linked=read('tdp43_pathology_sample_matches.tsv')
-selected=read('tdp43_selected_subject_samples.tsv')
-if selected and 'original_tissue' not in selected[0]: raise ValueError('Selection table predates original_tissue fix; rerun the full analysis to regenerate it.')
+ with (root/name).open(newline='') as f: return list(csv.DictReader(f,delimiter='\t'))
+selected=read('tdp43_selected_subject_samples.tsv'); linked=read('tdp43_pathology_sample_matches.tsv')
+if selected and 'original_tissue' not in selected[0]: raise ValueError('Selection table needs original_tissue; rerun the full analysis')
 lookup={}
 for r in linked:
-    key=(r['tissue'],r['original_tissue'],r['sample'])
-    if key in lookup: raise ValueError('Duplicate pathology sample key: '+str(key))
-    lookup[key]=r
-spec={
- 'unc13a':('UNC13A','chr19:-', [('cryptic 128','unc13a_128_reads',17642541,17642844),('cryptic 178','unc13a_178_reads',17642591,17642844),('canonical','unc13a_skip_reads',17641556,17642844)]),
- 'stmn2':('STMN2','chr8:+',[('cryptic','stmn2_cryptic_reads',79611214,79616821),('canonical','stmn2_canonical_reads',79611214,79636801)]),
- 'synj2':('SYNJ2','chr6:+',[('cryptic','synj2_cryptic_reads',158017290,158019983),('canonical','synj2_canonical_reads',158017290,158028755)]),
- 'phf2':('PHF2','chr9:+',[('cryptic','phf2_cryptic_reads',93660560,93661347),('canonical','phf2_canonical_reads',93660560,93662906)])}
-categories=['Absent','Sparse','Moderate','Frequent']
-groups=defaultdict(list)
-for sel in selected:
-    key=(sel['tissue'],sel['original_tissue'],sel['sample'])
-    if key not in lookup: raise ValueError('Selected sample not found: '+str(key))
-    r=lookup[key]; gene=sel['gene']; cell=sel['cell_type']
-    if r['subject_id']!=sel['subject_id'] or r['tdp43_'+cell]!=sel['category']:
-        raise ValueError('Selected sample identity or pathology mismatch: '+str(key))
-    if not r[gene+'_junction_depth'] or int(r[gene+'_junction_depth'])!=int(sel['junction_depth']):
-        raise ValueError('Selected sample depth mismatch: '+str(key))
-    groups[(sel['tissue'],cell,gene,sel['category'])].append((sel,r))
-
-for tissue,cell,gene in sorted({(k[0],k[1],k[2]) for k in groups}):
-    label,chrom,junctions=spec[gene]
-    positions=sorted({x for j in junctions for x in j[2:]})
-    compressed=[0.0]
-    for a,b in zip(positions,positions[1:]): compressed.append(compressed[-1]+math.log1p(b-a))
-    span=compressed[-1] or 1
-    xmap={p:0.08+0.84*x/span for p,x in zip(positions,compressed)}
-    fig,axes=plt.subplots(4,1,figsize=(12,12)); fig.subplots_adjust(top=.90,bottom=.15,hspace=.30)
-    rows=[]
-    for ax,category in zip(axes,categories):
-        items=groups.get((tissue,cell,gene,category),[]); n=len(items)
-        ax.set_xlim(0,1);ax.set_ylim(-.65,.72);ax.axis('off')
-        ax.plot([.04,.96],[0,0],color='black',lw=1.3)
-        ax.text(.01,.5,category+' (n='+str(n)+')',transform=ax.transAxes,ha='left',va='center',fontsize=11,fontweight='bold')
-        for idx,(name,col,start,end) in enumerate(junctions):
-            vals=[]
-            for sel,r in items:
-                depth=int(r[gene+'_junction_depth']); reads=int(r[col]); vals.append(reads/depth)
-                rows.append({'tissue':tissue,'cell_type':cell,'gene':label,'category':category,'subject_id':sel['subject_id'],'sample':sel['sample'],'pathology_match':sel['pathology_match'],'junction':name,'coordinates':chrom+':'+str(start)+'-'+str(end),'junction_reads':reads,'competing_depth':depth,'junction_fraction':reads/depth})
-            mean=sum(vals)/n if n else None
-            color='#cc3a36' if name=='canonical' else '#2685df'
-            y=.32 if name!='canonical' else -.36
-            if name=='cryptic 178': y=.50
-            arc=FancyArrowPatch((xmap[start],0),(xmap[end],0),connectionstyle='arc3,rad='+str(-.5 if y>0 else .5),arrowstyle='-',color=color,linewidth=.7 if mean is None else 1+8*mean,linestyle=':' if mean is None else '-',alpha=.95)
-            ax.add_patch(arc)
-            text=name+': '+('NA (n=0)' if mean is None else f'{100*mean:.2f}% (n={n})')
-            ax.text((xmap[start]+xmap[end])/2,y,text,ha='center',va='center',fontsize=9,bbox=dict(facecolor='white',edgecolor='none',alpha=.9))
-        if not n: ax.text(.5,.85,'No eligible subjects',transform=ax.transAxes,ha='center',fontsize=9)
-    fig.suptitle(label+' | '+tissue+' | '+cell+' pTDP-43\nMean per-subject competing-junction fraction; same subjects as bar chart',fontsize=14)
-    key='  |  '.join(f'{name}: {chrom}:{a}-{b}' for name,_,a,b in junctions)
-    fig.text(.05,.055,'Coordinates are .junc coordinates. '+key+'\nBlue = cryptic-supporting junction; red = canonical junction. Lines are junctions, not exon structures.',fontsize=8,wrap=True)
-    prefix=f'target_ALS_{tissue}_{label}_tdp43_{cell}_matched'
-    for ext in ('png','pdf','svg'): fig.savefig(out/(prefix+'.'+ext),dpi=180,bbox_inches='tight')
-    plt.close(fig)
-    with (out/(prefix+'.subject_junctions.tsv')).open('w',newline='') as f:
-        fields=['tissue','cell_type','gene','category','subject_id','sample','pathology_match','junction','coordinates','junction_reads','competing_depth','junction_fraction']
-        writer=csv.DictWriter(f,fieldnames=fields,delimiter='\t');writer.writeheader();writer.writerows(rows)
-print('Matched splicing diagrams:',out)
-MATCHED_PLOTS
+ k=(r['tissue'],r['original_tissue'],r['sample'])
+ if k in lookup: raise ValueError('Duplicate sample key: '+str(k))
+ lookup[k]=r
+spec={'unc13a':('chr19','-', [('unc13a_128_reads',17642541,17642844),('unc13a_178_reads',17642591,17642844),('unc13a_skip_reads',17641556,17642844)]),'stmn2':('chr8','+',[('stmn2_cryptic_reads',79611214,79616821),('stmn2_canonical_reads',79611214,79636801)]),'synj2':('chr6','+',[('synj2_cryptic_reads',158017290,158019983),('synj2_canonical_reads',158017290,158028755)]),'phf2':('chr9','+',[('phf2_cryptic_reads',93660560,93661347),('phf2_canonical_reads',93660560,93662906)])}
+fields=['tissue','cell_type','gene','group','subject','sample','original_tissue','chrom','strand','start','end','reads','depth','fraction']
+with (out/'matched_leafviz_input.tsv').open('w',newline='') as f:
+ w=csv.DictWriter(f,fieldnames=fields,delimiter='\t');w.writeheader()
+ for s in selected:
+  gene=s['gene']; cell=s['cell_type']; k=(s['tissue'],s['original_tissue'],s['sample']); r=lookup[k]
+  if r['subject_id']!=s['subject_id'] or r['tdp43_'+cell]!=s['category'] or int(r[gene+'_junction_depth'])!=int(s['junction_depth']): raise ValueError('Selected sample mismatch: '+str(k))
+  chrom,strand,events=spec[gene]; depth=int(s['junction_depth'])
+  for col,start,end in events:
+   count=int(r[col]); w.writerow(dict(tissue=s['tissue'],cell_type=cell,gene=gene.upper(),group=s['category'],subject=s['subject_id'],sample=s['sample'],original_tissue=s['original_tissue'],chrom=chrom,strand=strand,start=start,end=end+1,reads=count,depth=depth,fraction=count/depth))
+print('Prepared matched LeafViz input:',out/'matched_leafviz_input.tsv')
+MATCHED_DATA
+Rscript - <<'MATCHED_R'
+suppressPackageStartupMessages({library(ggplot2);library(gridExtra);library(grid)})
+infile <- file.path(Sys.getenv('PLOT_OUTDIR'),'matched_leafviz_input.tsv')
+x <- read.delim(infile,check.names=FALSE,stringsAsFactors=FALSE)
+source_lines <- readLines(Sys.getenv('PLOT_SCRIPT'),warn=FALSE)
+start <- grep('^# GTF annotation and local exon model\\.',source_lines)
+if (length(start)!=1) stop('Original LeafViz plotting section not found uniquely; check plot_sQTL_leafviz_PSI.R version')
+# Include the existing GTF annotation, coordinate compression, panels, and exports.
+plot_code <- paste(source_lines[start:length(source_lines)],collapse='\n')
+plot_code <- gsub('Original junction PSI (%)','Mean competing-junction fraction (%)',plot_code,fixed=TRUE)
+plot_code <- gsub('Neuronal TDP43 score','pTDP43 score',plot_code,fixed=TRUE)
+keys <- unique(x[,c('tissue','cell_type','gene'),drop=FALSE])
+for (i in seq_len(nrow(keys))) {
+ tissue <- keys$tissue[i]; cell <- keys$cell_type[i]; gene <- keys$gene[i]
+ y <- x[x$tissue==tissue & x$cell_type==cell & x$gene==gene,,drop=FALSE]
+ event <- unique(y[,c('chrom','strand','start','end'),drop=FALSE]); event <- event[order(event$start,event$end),,drop=FALSE]
+ event$junction_id <- paste(event$chrom,event$strand,paste0(event$start,'-',event$end),sep=':')
+ group_levels <- c('Absent','Sparse','Moderate','Frequent'); pathology_mode <- TRUE
+ group_mean <- matrix(NA_real_,length(group_levels),nrow(event),dimnames=list(group_levels,event$junction_id))
+ junction_n <- matrix(0L,length(group_levels),nrow(event),dimnames=list(group_levels,event$junction_id)); group_n <- setNames(integer(length(group_levels)),group_levels)
+ for (g in group_levels) {
+  z <- y[y$group==g,,drop=FALSE]; group_n[g] <- length(unique(z$subject))
+  for (j in seq_len(nrow(event))) { v <- z$fraction[z$start==event$start[j] & z$end==event$end[j]]; if(length(v)) {group_mean[g,j] <- mean(v); junction_n[g,j] <- length(v)} }
+ }
+ anchor_chr <- event$chrom[1]; anchor_strand <- event$strand[1]; anchor <- event$junction_id[nrow(event)]
+ a <- list(gene=gene,anchor=anchor,gtf=Sys.getenv('GTF'),outdir=Sys.getenv('PLOT_OUTDIR'),prefix=paste('target_ALS',tissue,gene,'tdp43',cell,'matched',sep='_'))
+ psi_source <- rep('competing_junction_fraction',nrow(event))
+ usage_long <- do.call(rbind,lapply(group_levels,function(g) data.frame(group=g,n=as.integer(junction_n[g,]),anchor_group_n=group_n[g],PSI_source=psi_source,junction_id=event$junction_id,chrom=event$chrom,strand=event$strand,start=event$start,end=event$end,mean_PSI=as.numeric(group_mean[g,]))))
+ eval(parse(text=plot_code),envir=environment())
+}
+MATCHED_R
