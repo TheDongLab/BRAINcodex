@@ -343,6 +343,9 @@ with (out/'matched_leafviz_input.tsv').open('w',newline='') as f:
    count=int(r[col]); w.writerow(dict(tissue=s['tissue'],cell_type=cell,gene=gene.upper(),group=s['category'],subject=s['subject_id'],sample=s['sample'],original_tissue=s['original_tissue'],chrom=chrom,strand=strand,start=start,end=end+1,reads=count,depth=depth,fraction=count/depth))
 print('Prepared matched LeafViz input:',out/'matched_leafviz_input.tsv')
 MATCHED_DATA
+# Switch to a clean R module environment after all Python work is finished.
+module purge
+module load R
 Rscript - <<'MATCHED_R'
 suppressPackageStartupMessages({library(ggplot2);library(gridExtra);library(grid)})
 infile <- file.path(Sys.getenv('PLOT_OUTDIR'),'matched_leafviz_input.tsv')
