@@ -4,15 +4,32 @@
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=24G
 #SBATCH --time=06:00:00
-#SBATCH --output=/home/zw529/donglab/data/target_ALS/QTL/SCREEN_sQTL_PSI_ranking/run_%j.out
-#SBATCH --error=/home/zw529/donglab/data/target_ALS/QTL/SCREEN_sQTL_PSI_ranking/run_%j.err
+#SBATCH --output=/home/zw529/donglab/data/target_ALS/QTL/SCREEN_sqtl_%j.launch.out
+#SBATCH --error=/home/zw529/donglab/data/target_ALS/QTL/SCREEN_sqtl_%j.launch.err
 # Self-contained SCREEN overlap ranking and genotype/PSI plotting.
-# Submit: sbatch ~/donglab/pipelines/scripts/QTL/run_SCREEN_sqtl.sh
-# Results in ~/donglab/data/target_ALS/QTL/SCREEN_sQTL_PSI_ranking/
+# TargetALS (default): sbatch run_SCREEN_sqtl.sh
+# AnswerALS: sbatch --export=ALL,EXPERIMENT=answer_ALS run_SCREEN_sqtl.sh
+# Results and analysis logs: $HOME/donglab/data/$EXPERIMENT/QTL/SCREEN_sQTL_PSI_ranking/
+# Slurm creates small launcher logs in the submission directory before redirection.
 set -euo pipefail
+EXPERIMENT="${EXPERIMENT:-target_ALS}"
+# Accept the requested answerALS spelling as an alias for the directory name.
+[[ "$EXPERIMENT" != "answerALS" ]] || EXPERIMENT=answer_ALS
+[[ "$EXPERIMENT" == "target_ALS" || "$EXPERIMENT" == "answer_ALS" ]] || {
+    echo "ERROR: EXPERIMENT must be target_ALS or answer_ALS" >&2
+    exit 1
+}
+ROOT="$HOME/donglab/data/$EXPERIMENT"
+OUTDIR="$ROOT/QTL/SCREEN_sQTL_PSI_ranking"
+mkdir -p "$OUTDIR"
+LOG_ID="${SLURM_JOB_ID:-manual_$$}"
+exec > "$OUTDIR/run_${LOG_ID}.out" 2> "$OUTDIR/run_${LOG_ID}.err"
+echo "SCREEN overlaps: $EXPERIMENT"
+echo "Input root: $ROOT"
+echo "Output directory: $OUTDIR"
 TASK_PYTHON=/home/zw529/donglab/pipelines/modules/miniconda3/bin/python
-mkdir -p /home/zw529/donglab/data/target_ALS/QTL/SCREEN_sQTL_PSI_ranking
-"$TASK_PYTHON" -I -u - <<'SCREEN_RANK_PYTHON'
+[[ -x "$TASK_PYTHON" ]] || { echo "ERROR: Python unavailable: $TASK_PYTHON" >&2; exit 1; }
+"$TASK_PYTHON" -I -u - --root "$ROOT" --experiment "$EXPERIMENT" <<'SCREEN_RANK_PYTHON'
 #!/usr/bin/env python3
 """Rank SCREEN-overlapping sQTLs by observed homozygote PSI difference. Coordinates: SNP 1-based; SCREEN BED 0-based half-open."""
 import argparse
@@ -54,17 +71,20 @@ def matrix(path, wanted):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--experiment", choices=("target_ALS", "answer_ALS"), default="target_ALS")
     parser.add_argument("--root", type=Path,
                         default=Path.home() / "donglab/data/target_ALS")
     parser.add_argument('--screen', type=Path, default=Path('/home/zw529/donglab/references/genome/Homo_sapiens/ENCODE/SCREEN'))
     args = parser.parse_args()
     root = args.root
+    tissues = ["iPSC_Motor_Neuron"] if args.experiment == "answer_ALS" else TISSUES
+    print(f"Experiment: {args.experiment}; tissues: {', '.join(tissues)}", flush=True)
     out = root / "QTL/SCREEN_sQTL_PSI_ranking"
     screen = args.screen
     overlap_counts = {}
     missing_locations = []
     sigs, locations, targets = {}, {}, set()
-    for tissue in TISSUES:
+    for tissue in tissues:
         q = root / tissue / "sQTL"
         s = pd.read_csv(q / "results" / f"{tissue}_sQTL.FDR0.05.txt",
                         sep="\t", dtype={"junction_id": str, "snpid": str})
@@ -107,7 +127,7 @@ def main():
                     overlaps[chrom, pos0 + 1].add((cls, element, f'chr{chrom}:{lo}-{hi}'))
     out.mkdir(parents=True, exist_ok=True)
     overlap_rows = []
-    for tissue in TISSUES:
+    for tissue in tissues:
         s = sigs[tissue]
         keep = []
         for row in s.to_dict('records'):
@@ -147,7 +167,7 @@ def main():
         "n_ref_ref", "n_hom_alt", "mean_ref_ref_pct", "mean_hom_alt_pct",
         "delta_alt_minus_ref_pp", "abs_delta_pp", "FDR",
     ]
-    for tissue in TISSUES:
+    for tissue in tissues:
         print(f"\nLoading {tissue}...", flush=True)
         q, s = root / tissue / "sQTL", sigs[tissue]
         records, excluded = [], []
@@ -238,7 +258,7 @@ if __name__ == "__main__":
     main()
 
 SCREEN_RANK_PYTHON
-"$TASK_PYTHON" -I -u - <<'SCREEN_PLOT_PYTHON'
+"$TASK_PYTHON" -I -u - --outdir "$OUTDIR" <<'SCREEN_PLOT_PYTHON'
 #!/usr/bin/env python3
 """Plot observed PSI by REF/ALT genotype for the SCREEN-selected top pairs."""
 import argparse
