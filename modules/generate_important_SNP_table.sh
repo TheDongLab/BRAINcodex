@@ -1,13 +1,24 @@
 #!/bin/bash
 #SBATCH --job-name=ALS_variant_evidence
-#SBATCH --output=/home/zw529/donglab/data/target_ALS/QTL/generate_important_SNP_table.out
-#SBATCH --error=/home/zw529/donglab/data/target_ALS/QTL/generate_important_SNP_table.err
+#SBATCH --output=/home/zw529/donglab/data/answer_ALS/QTL/generate_important_SNP_table.out
+#SBATCH --error=/home/zw529/donglab/data/answer_ALS/QTL/generate_important_SNP_table.err
 #SBATCH --time=06:00:00
 #SBATCH --partition=day
-#SBATCH --cpus-per-task=2
+#SBATCH --cpus-per-task=1
 #SBATCH --mem=32G
 set -euo pipefail
-ROOT="$HOME/donglab/data/target_ALS"
+# TargetALS is the legacy default. Accept answerALS as an alias.
+EXPERIMENT="${EXPERIMENT:-target_ALS}"
+[[ "$EXPERIMENT" != "answerALS" ]] || EXPERIMENT=answer_ALS
+[[ "$EXPERIMENT" == "target_ALS" || "$EXPERIMENT" == "answer_ALS" ]] || {
+    echo "ERROR: EXPERIMENT must be target_ALS or answer_ALS" >&2
+    exit 1
+}
+export EXPERIMENT
+ROOT="$HOME/donglab/data/$EXPERIMENT"
+mkdir -p "$ROOT/QTL"
+exec > "$ROOT/QTL/generate_important_SNP_table.out" 2> "$ROOT/QTL/generate_important_SNP_table.err"
+echo "Variant evidence: $EXPERIMENT"
 GWAS="$HOME/donglab/references/GWAS/ALS/harmonised/34873335-GCST90027163-MONDO_0004976.h.tsv.gz"
 GTF="$HOME/donglab/references/genome/Homo_sapiens/UCSC/hg38/Annotation/gencode/gencode.v49.annotation.gtf"
 OUTDIR="$ROOT/QTL/ALS_variant_validation_evidence"
@@ -15,6 +26,8 @@ mkdir -p "$OUTDIR"
 for f in "$GWAS" "$GTF"; do
     [[ -s "$f" ]] || { echo "ERROR: missing/empty $f"; exit 1; }
 done
+SCREEN_TABLE="$ROOT/QTL/SCREEN_sQTL_PSI_ranking/SCREEN_overlaps.tsv"
+[[ -s "$SCREEN_TABLE" ]] || { echo "ERROR: missing SCREEN table: $SCREEN_TABLE" >&2; exit 1; }
 python -u - "$GWAS" "$ROOT" "$OUTDIR" "$GTF" <<'PY'
 import sys
 import csv
@@ -29,6 +42,8 @@ ROOT = Path(sys.argv[2])
 OUTDIR = Path(sys.argv[3])
 GTF = Path(sys.argv[4])
 TISSUES = ['Cortex', 'Spinal_Cord', 'Cerebellum', 'Frontal_Cortex', 'Cervical_Spinal_Cord', 'Lumbar_Spinal_Cord', 'Motor_Cortex']
+if os.environ['EXPERIMENT'] == 'answer_ALS':
+    TISSUES = ['iPSC_Motor_Neuron']
 QTLS = ['eQTL', 'sQTL', 'cQTL', 'circ_eQTL']
 
 def result_label(q):
@@ -112,6 +127,8 @@ def parse_event_coordinates(event):
       chr10:100164003:100167406
     """
     s = str(event).strip()
+    if os.environ['EXPERIMENT'] == 'answer_ALS' and not s.lower().startswith('chr'):
+        s = 'chr' + s
     patterns = [('^(chr[^:]+):([+-]):(\\d+)-(\\d+)$', 'strand_first'), ('^(chr[^:]+):(\\d+)-(\\d+):([+-])$', 'strand_last'), ('^(chr[^:]+):(\\d+):(\\d+):([+-])$', 'strand_last'), ('^(chr[^:]+):(\\d+)-(\\d+)$', 'no_strand'), ('^(chr[^:]+):(\\d+):(\\d+)$', 'no_strand')]
     for (pat, mode) in patterns:
         m = re.match(pat, s)
