@@ -11,8 +11,9 @@ set -euo pipefail
 
 PYTHON="$HOME/donglab/pipelines/modules/miniconda3/bin/python"
 RUN="$HOME/donglab/data/target_ALS/QTL/pangolin/full_20261112_163519"
+GTF="$HOME/donglab/references/genome/Homo_sapiens/UCSC/hg38/Annotation/gencode/gencode.v49.annotation.gtf"
 
-"$PYTHON" - "$RUN" <<'PY'
+"$PYTHON" - "$RUN" "$GTF" <<'PY'
 import csv
 import math
 import re
@@ -24,6 +25,32 @@ from contextlib import ExitStack
 run = Path(sys.argv[1])
 out = run / "merged"
 size = 1000
+
+# Read gene features once; retain Ensembl IDs when a symbol is unavailable.
+gene_names = {}
+with Path(sys.argv[2]).open() as handle:
+    for line in handle:
+        if line.startswith("#"):
+            continue
+        columns = line.rstrip("\n").split("\t")
+        if len(columns) != 9 or columns[2] != "gene":
+            continue
+        attrs = dict(re.findall(r'(\w+)\s+"([^"]*)"', columns[8]))
+        gid = attrs.get("gene_id")
+        if gid:
+            name = attrs.get("gene_name", gid)
+            gene_names[gid] = name
+            gene_names.setdefault(gid.split(".")[0], name)
+if not gene_names:
+    raise SystemExit("ERROR: No gene IDs found in GTF.")
+
+def symbols(text):
+    ids = list(dict.fromkeys(re.findall(r'ENSG\d+(?:\.\d+)?', text)))
+    return ";".join(dict.fromkeys(
+        gene_names.get(gid, gene_names.get(gid.split(".")[0], gid))
+        for gid in ids
+    ))
+
 
 with (run / "variants.csv").open(newline="") as handle:
     expected = [
@@ -81,6 +108,7 @@ fields = [
     "variant_id", "CHROM", "POS", "REF", "ALT",
     "pangolin_status", "max_abs_reported_change",
     "strongest_site_changes", "pangolin_raw",
+    "strongest_gene_symbols", "all_pangolin_gene_symbols",
 ]
 
 with (out / "variant_predictions.tsv").open("w", newline="") as handle:
@@ -125,15 +153,32 @@ with (out / "variant_predictions.tsv").open("w", newline="") as handle:
             ),
             strongest_site_changes=";".join(strongest),
             pangolin_raw=raw,
+            strongest_gene_symbols=symbols(";".join(strongest)),
+            all_pangolin_gene_symbols=symbols(raw),
         )
         annotations[record["variant_id"]] = record
         counts[status] += 1
         writer.writerow(record)
 
+# Rank reported changes without altering original ordering in the main table.
+ranked = sorted(
+    (r for r in annotations.values()
+     if r["pangolin_status"] == "scored_reported_change"),
+    key=lambda r: (-float(r["max_abs_reported_change"]), r["variant_id"]),
+)
+for filename in ("variant_predictions.ranked.tsv",
+                 "variant_predictions.ranked.genes.tsv"):
+    with (out / filename).open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fields, delimiter="\t")
+        writer.writeheader()
+        writer.writerows(ranked)
+print(f"Ranked {len(ranked):,} variants with gene symbols.")
+
 audit = run / "sqtl_pairs_mapping.tsv"
 extra = [
     "pangolin_status", "max_abs_reported_change",
     "strongest_site_changes", "pangolin_raw",
+    "strongest_gene_symbols", "all_pangolin_gene_symbols",
 ]
 tissue_counts = Counter()
 
