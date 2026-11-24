@@ -5,7 +5,7 @@
 #SBATCH --time=06:00:00
 #SBATCH --partition=day
 #SBATCH --cpus-per-task=1
-#SBATCH --mem=32G
+#SBATCH --mem=300G
 set -euo pipefail
 # TargetALS is the legacy default. Accept answerALS as an alias.
 EXPERIMENT="${EXPERIMENT:-target_ALS}"
