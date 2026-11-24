@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=ALS_variant_evidence
-#SBATCH --output=/home/zw529/donglab/data/answer_ALS/QTL/generate_important_SNP_table.out
-#SBATCH --error=/home/zw529/donglab/data/answer_ALS/QTL/generate_important_SNP_table.err
+#SBATCH --output=/home/zw529/donglab/data/target_ALS/QTL/generate_important_SNP_table.out
+#SBATCH --error=/home/zw529/donglab/data/target_ALS/QTL/generate_important_SNP_table.err
 #SBATCH --time=06:00:00
 #SBATCH --partition=day
 #SBATCH --cpus-per-task=1
