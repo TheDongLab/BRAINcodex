@@ -247,13 +247,15 @@ write('tdp43_selected_subject_samples.tsv',selected_samples,['tissue','original_
 write('tdp43_mean_cryptic_reads.tsv',summary,['tissue','cell_type','category','gene','n','mean_cryptic_reads','sum_cryptic_reads'])
 # Brown-style exploratory burden: standardize each gene within dataset/tissue
 # across all measured RNA samples, irrespective of pathology; sum only complete
-# four-event profiles. These cohort-derived scores are descriptive, not a
+# event profiles: two for Answer ALS iPSC motor neurons, four otherwise.
+# These cohort-derived scores are descriptive, not a
 # held-out prediction model. Means and sample SDs are exported for audit.
 genes=['unc13a','stmn2','synj2','phf2']
 reference=[]; score_rows=[]
 path_lookup={(r['dataset'],r['tissue'],r['original_tissue'],r['sample']):r for r in linked}
 for dataset,tissue in sorted({(r['dataset'],r['tissue']) for r in rows}):
   rr=[r for r in rows if r['dataset']==dataset and r['tissue']==tissue]
+  panel=['unc13a','stmn2'] if dataset=='answer_ALS' and tissue=='iPSC_Motor_Neuron' else genes
   params={}
   for gene in genes:
     values=[float(r[gene+'_cryptic_fraction']) for r in rr if r.get(gene+'_cryptic_fraction','')!='']
@@ -268,16 +270,17 @@ for dataset,tissue in sorted({(r['dataset'],r['tissue']) for r in rows}):
     zs=[]; missing=[]
     for gene in genes:
       fraction=r.get(gene+'_cryptic_fraction',''); mean,sd,usable=params[gene]
-      z=(float(fraction)-mean)/sd if fraction!='' and usable else None
+      z=(float(fraction)-mean)/sd if gene in panel and fraction!='' and usable else None
       rec[gene+'_junction_depth']=r.get(gene+'_junction_depth','')
       rec[gene+'_cryptic_fraction']=fraction
       rec[gene+'_z']=z if z is not None else ''
-      if z is None: missing.append(gene)
-      else: zs.append(z)
-    rec.update(n_events=len(zs),missing_events=','.join(missing),tdp43_lof_zsum=sum(zs) if len(zs)==4 else '',tdp43_lof_zmean=sum(zs)/4 if len(zs)==4 else '',score_status='complete' if len(zs)==4 else 'incomplete')
+      if gene in panel:
+        if z is None: missing.append(gene)
+        else: zs.append(z)
+    rec.update(score_panel=','.join(panel),panel_size=len(panel),n_events=len(zs),missing_events=','.join(missing),tdp43_lof_zsum=sum(zs) if len(zs)==len(panel) else '',tdp43_lof_zmean=sum(zs)/len(panel) if len(zs)==len(panel) else '',score_status='complete' if len(zs)==len(panel) else 'incomplete')
     score_rows.append(rec)
 write('tdp43_lof_zscore_reference.tsv',reference,['dataset','tissue','gene','n_reference','mean_fraction','sd_fraction','status'])
-score_fields=['dataset','tissue','original_tissue','sample','subject_id','pathology_match','tdp43_neuronal','tdp43_glial']+[x for g in genes for x in (g+'_junction_depth',g+'_cryptic_fraction',g+'_z')]+['n_events','missing_events','tdp43_lof_zsum','tdp43_lof_zmean','score_status']
+score_fields=['dataset','tissue','original_tissue','sample','subject_id','pathology_match','tdp43_neuronal','tdp43_glial']+[x for g in genes for x in (g+'_junction_depth',g+'_cryptic_fraction',g+'_z')]+['score_panel','panel_size','n_events','missing_events','tdp43_lof_zsum','tdp43_lof_zmean','score_status']
 write('tdp43_lof_zscores.tsv',score_rows,score_fields)
 # Show the score distribution across all samples and by neuronal pathology.
 # Each point is an RNA sample; multiple samples may come from one subject.
@@ -286,6 +289,18 @@ rng=random.Random(43)
 for dataset,tissue in sorted({(r['dataset'],r['tissue']) for r in score_rows}):
   cohort=[r for r in score_rows if r['dataset']==dataset and r['tissue']==tissue]
   complete=[r for r in cohort if r['score_status']=='complete']
+  if dataset=='answer_ALS' and tissue=='iPSC_Motor_Neuron':
+    fig,ax=plt.subplots(figsize=(7,4.5),constrained_layout=True)
+    vals=[r['tdp43_lof_zsum'] for r in complete]
+    if vals:
+      ax.hist(vals,bins=min(20,max(5,int(math.sqrt(len(vals))))),color='#487895',edgecolor='white')
+      ax.axvline(0,color='black',lw=1,ls='--')
+    else: ax.text(.5,.5,'No complete two-event scores',ha='center',va='center',transform=ax.transAxes)
+    ax.set_xlabel('Sum of UNC13A and STMN2 Z scores');ax.set_ylabel('RNA samples')
+    ax.set_title(f'Complete two-event scores: {len(complete)}/{len(cohort)} samples')
+    fig.suptitle(dataset+' | '+tissue+' — exploratory two-event TDP-43 cryptic burden')
+    fig.savefig(out/f'{dataset}_{tissue}_tdp43_lof_zscore.png',dpi=170);plt.close(fig)
+    continue
   fig,axes=plt.subplots(1,2,figsize=(11,4.5),constrained_layout=True)
   vals=[r['tdp43_lof_zsum'] for r in complete]
   if vals:
