@@ -4,8 +4,8 @@
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=500G
 #SBATCH --time=24:00:00
-#SBATCH --output=/home/zw529/donglab/data/target_ALS/QTL/rbp_junction_map.out
-#SBATCH --error=/home/zw529/donglab/data/target_ALS/QTL/rbp_junction_map.err
+#SBATCH --output=/home/zw529/donglab/data/target_ALS/QTL/rbp_junction_map_%j.out
+#SBATCH --error=/home/zw529/donglab/data/target_ALS/QTL/rbp_junction_map_%j.err
 set -euo pipefail
 # Usage: sbatch run_rbp_junction_map.sh [--cohort both|target|answer] [--tissues TISSUE ...]
 # Override Python with TASK_PYTHON; run --help for all options.
@@ -18,8 +18,9 @@ fi
     echo "ERROR: Install numpy, pandas and scipy in this Python environment, or set TASK_PYTHON to a suitable Python executable." >&2
     exit 1
 }
+export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1
 "$TASK_PYTHON" -u - "$@" <<'PY'
-import argparse, csv, gzip, json, math, re, sys
+import argparse, csv, gzip, json, math, re, sys, sqlite3, hashlib, os
 from pathlib import Path
 from collections import defaultdict, Counter
 import numpy as np
@@ -32,6 +33,8 @@ except ImportError:
 
 HOME=Path.home(); BASE=HOME/'donglab/data'; REF=HOME/'donglab/references/genome/Homo_sapiens'
 p=argparse.ArgumentParser(description='Cohort- and tissue-specific RBP expression / unannotated junction associations.')
+p.add_argument('--force',action='store_true',help='Recompute completed tissues')
+p.add_argument('--batch-size',type=int,default=512,help='RBP batch size')
 p.add_argument('--cohort',choices=['both','target','answer'],default='both')
 p.add_argument('--tissues',nargs='+',help='Exact tissue directory names; default: discover directories with RNAseq/Processed')
 p.add_argument('--outdir',type=Path,default=BASE/'target_ALS/QTL/rbp_unannotated_junction_associations')
@@ -44,7 +47,7 @@ p.add_argument('--min-tpm',type=float,default=1.0,help='Minimum median RBP TPM')
 p.add_argument('--fdr',type=float,default=0.05)
 p.add_argument('--max-map-edges',type=int,default=500,help='Maximum edges displayed in HTML; all significant results remain in tables')
 a=p.parse_args()
-if a.min_samples<5 or a.min_reads<1 or a.min_carriers<2 or not 0<a.fdr<=1: p.error('Invalid threshold')
+if a.batch_size<1 or a.min_samples<5 or a.min_reads<1 or a.min_carriers<2 or not 0<a.fdr<=1: p.error('Invalid threshold')
 for f in [a.gtf,a.rbp_list]:
  if not f.is_file(): sys.exit('Missing input: '+str(f))
 def chrom(s): return re.sub(r'^chr','',str(s),flags=re.I)
@@ -132,6 +135,15 @@ def run(cohort):
  print(cohort,'tissues:',[x.name for x in dirs],flush=True)
  for tissue in dirs:
   out=a.outdir/cohort/tissue.name; out.mkdir(parents=True,exist_ok=True)
+  marker=out/'COMPLETE.json'
+  options={k:str(v) for k,v in vars(a).items() if k not in ('force','tissues','cohort')}
+  fingerprint=hashlib.sha256(json.dumps(options,sort_keys=True).encode()).hexdigest()
+  if marker.exists() and not a.force:
+   old=json.loads(marker.read_text())
+   if old.get('settings')==fingerprint:
+    print('Skipping completed tissue:',cohort,tissue.name,flush=True); continue
+   raise RuntimeError('Completed tissue has different settings; use --force: '+str(out))
+  if marker.exists(): marker.unlink()
   audit=[]; samples=[]; seen=set(); processed=tissue/'RNAseq/Processed'
   for d in sorted(processed.iterdir()):
    if not d.is_dir(): continue
@@ -182,32 +194,62 @@ def run(cohort):
   geneids=sorted(gene_symbols); E=np.array([[row.get(g,np.nan) for g in geneids] for row in ex],dtype=float)
   genes=[i for i in range(len(geneids)) if np.isfinite(E[valid,i]).sum()>=a.min_samples and np.nanmedian(E[valid,i])>=a.min_tpm and np.nanstd(E[valid,i])>0]
   print('Eligible RBP genes:',len(genes),flush=True)
-  records=[]; tested_events=0
+  dbpath=out/'working_associations.sqlite'
+  if dbpath.exists(): dbpath.unlink()
+  con=sqlite3.connect(str(dbpath)); con.execute('PRAGMA journal_mode=DELETE'); con.execute('PRAGMA synchronous=NORMAL'); con.execute('PRAGMA temp_store=FILE')
+  cols=['rbp_ensembl','rbp_gene','junction_id','chrom','strand','start','end','n_samples','n_with_reads','partial_r','p_value','cluster_junctions']
+  con.execute('CREATE TABLE pairs (rbp_ensembl TEXT, rbp_gene TEXT, junction_id TEXT, chrom TEXT, strand TEXT, start INTEGER, end INTEGER, n_samples INTEGER, n_with_reads INTEGER, partial_r REAL, p_value REAL, cluster_junctions INTEGER, fdr REAL)')
+  tested_events=0; total_pairs=0
+  logged=np.log2(E+1)
+  # Each event has its own covered samples. RBPs with the same missingness share one projection.
   for c,s,ivs in clusters:
    keys=[(c,s,l,r) for l,r in ivs]
    if len(keys)<2: continue
    counts=np.array([[j.get(k,0) for k in keys] for j in js],dtype=float); totals=counts.sum(axis=1)
    for k,counts1 in zip(keys,counts.T):
     if k in annotated or np.count_nonzero(counts1[valid])<a.min_carriers: continue
-    mask=valid & (totals>=a.min_reads); n=int(mask.sum()); df=n-X.shape[1]-1
-    if n<a.min_samples or df<=1: continue
-    y=counts1[mask]/totals[mask]; xx=X[mask]
-    if np.linalg.matrix_rank(xx)<xx.shape[1]: continue
-    yres=y-xx@np.linalg.lstsq(xx,y,rcond=None)[0]; yy=float(yres@yres)
-    if yy<1e-12: continue
-    tested_events+=1
+    base=valid & (totals>=a.min_reads)
+    if base.sum()<a.min_samples: continue
+    patterns=defaultdict(list)
     for i in genes:
-     if not np.isfinite(E[mask,i]).all(): continue
-     raw=np.log2(E[mask,i]+1); xr=raw-xx@np.linalg.lstsq(xx,raw,rcond=None)[0]; ss=float(xr@xr)
-     if ss<1e-12: continue
-     corr=float(np.clip((xr@yres)/math.sqrt(ss*yy),-1+1e-12,1-1e-12)); pv=float(2*tdist.sf(abs(corr)*math.sqrt(df/(1-corr*corr)),df))
-     records.append((geneids[i],';'.join(sorted(gene_symbols[geneids[i]])),f'chr{c}:{s}:{k[2]}-{k[3]}',c,s,k[2],k[3],n,int(np.count_nonzero(counts1[mask])),corr,pv,len(keys)))
-  cols=['rbp_ensembl','rbp_gene','junction_id','chrom','strand','start','end','n_samples','n_with_reads','partial_r','p_value','cluster_junctions']
-  res=pd.DataFrame(records,columns=cols)
-  if len(res): res['fdr']=bh(res.p_value.to_numpy()); res=res.sort_values(['fdr','p_value']); sig=res[res.fdr<=a.fdr].copy()
-  else: res['fdr']=pd.Series(dtype=float); sig=res.copy()
-  res.to_csv(out/'all_tested_associations.tsv.gz',sep='\t',index=False,compression='gzip')
+     mask=base & np.isfinite(logged[:,i]); patterns[np.packbits(mask).tobytes()].append(i)
+    event_tested=False
+    for group in patterns.values():
+     mask=base & np.isfinite(logged[:,group[0]]); n=int(mask.sum()); xx=X[mask]
+     rank=np.linalg.matrix_rank(xx); df=n-rank-1
+     if n<a.min_samples or df<=1: continue
+     y=counts1[mask]/totals[mask]; Q,_=np.linalg.qr(xx,mode='reduced') if rank==xx.shape[1] else (None,None)
+     if Q is None:
+      u,sv,_=np.linalg.svd(xx,full_matrices=False); Q=u[:,:rank]
+     yr=y-Q@(Q.T@y); yy=float(yr@yr)
+     if yy<1e-12: continue
+     for start in range(0,len(group),a.batch_size):
+      idx=group[start:start+a.batch_size]; raw=logged[np.ix_(mask,idx)]; xr=raw-Q@(Q.T@raw); ss=np.sum(xr*xr,axis=0); good=ss>1e-12
+      if not np.any(good): continue
+      ii=np.asarray(idx)[good]; corr=np.clip((xr[:,good].T@yr)/np.sqrt(ss[good]*yy),-1+1e-12,1-1e-12)
+      pv=2*tdist.sf(np.abs(corr)*np.sqrt(df/(1-corr*corr)),df)
+      jid=f'chr{c}:{s}:{k[2]}-{k[3]}'; carriers=int(np.count_nonzero(counts1[mask])); batch=[(geneids[int(i)],';'.join(sorted(gene_symbols[geneids[int(i)]])),jid,c,s,k[2],k[3],n,carriers,float(r),float(p),len(keys)) for i,r,p in zip(ii,corr,pv)]
+      con.executemany('INSERT INTO pairs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,NULL)',batch); total_pairs+=len(batch); event_tested=True
+    if event_tested: tested_events+=1
+    if tested_events and tested_events%100==0: con.commit(); print('Events:',tested_events,'pairs:',total_pairs,flush=True)
+  con.commit(); print('Calculating tissue-wide FDR for',total_pairs,'tests',flush=True)
+  # The kth largest p-value has ascending rank m-k+1. Running minimum gives BH q-values, including ties.
+  updates=[]; running=1.0
+  for j,(rowid,pval) in enumerate(con.execute('SELECT rowid,p_value FROM pairs ORDER BY p_value DESC,rowid DESC')):
+   running=min(running,float(pval)*total_pairs/(total_pairs-j)); updates.append((min(1.0,running),rowid))
+   if len(updates)>=50000: con.executemany('UPDATE pairs SET fdr=? WHERE rowid=?',updates); updates=[]
+  if updates: con.executemany('UPDATE pairs SET fdr=? WHERE rowid=?',updates)
+  con.commit()
+  with gzip.open(out/'all_tested_associations.tsv.gz','wt',newline='') as fh:
+   writer=csv.writer(fh,delimiter='\t'); writer.writerow(cols+['fdr'])
+   cur=con.execute('SELECT '+','.join(cols)+',fdr FROM pairs ORDER BY p_value')
+   while True:
+    rows=cur.fetchmany(50000)
+    if not rows: break
+    writer.writerows(rows)
+  sig=pd.read_sql_query('SELECT '+','.join(cols)+',fdr FROM pairs WHERE fdr<=? ORDER BY fdr,p_value',con,params=(a.fdr,))
   sig.to_csv(out/'significant_edges.tsv',sep='\t',index=False)
+  con.close(); dbpath.unlink()
   rbp=sig.groupby(['rbp_ensembl','rbp_gene'],as_index=False).agg(n_junctions=('junction_id','nunique'),junctions=('junction_id',lambda x:';'.join(sorted(set(x)))))
   ev=sig.groupby('junction_id',as_index=False).agg(n_rbps=('rbp_ensembl','nunique'),rbps=('rbp_gene',lambda x:';'.join(sorted(set(x)))))
   rbp.to_csv(out/'rbp_to_junctions.tsv',sep='\t',index=False); ev.to_csv(out/'junction_to_rbps.tsv',sep='\t',index=False)
@@ -215,8 +257,9 @@ def run(cohort):
   edges=sig.head(a.max_map_edges).to_dict('records'); data=json.dumps(edges).replace('</','<\\/')
   html='''<!doctype html><meta charset="utf-8"><title>RBP junction associations</title><style>body{font:14px sans-serif}svg{border:1px solid #ddd}line{stroke-opacity:.32}text{font-size:11px;cursor:pointer}input{margin:8px}</style><h2>RBP–unannotated junction associations</h2><p>Click a label to highlight its links. Red: positive; blue: negative. Display limited to the strongest edges; see tables for all results.</p><input id="q" placeholder="Search label"><svg id="g"></svg><script>const E=DATA,svg=document.querySelector('#g'),N='http://www.w3.org/2000/svg';let L=[...new Set(E.map(x=>x.rbp_gene))].sort(),R=[...new Set(E.map(x=>x.junction_id))].sort(),h=Math.max(400,24*Math.max(L.length,R.length)+60);svg.setAttribute('width',1200);svg.setAttribute('height',h);let lines=[];function el(n,a){let z=document.createElementNS(N,n);for(let k in a)z.setAttribute(k,a[k]);svg.appendChild(z);return z} E.forEach(e=>{let l=el('line',{x1:250,y1:30+24*L.indexOf(e.rbp_gene),x2:750,y2:30+24*R.indexOf(e.junction_id),stroke:e.partial_r>0?'#d45d57':'#447bb5','stroke-width':1.5});lines.push([l,e])}); function label(s,x,y){let t=el('text',{x,y});t.textContent=s;t.onclick=()=>lines.forEach(([l,e])=>l.style.strokeOpacity=(e.rbp_gene===s||e.junction_id===s)?1:.03)} L.forEach((s,i)=>label(s,10,34+24*i));R.forEach((s,i)=>label(s,760,34+24*i));document.querySelector('#q').oninput=e=>{let q=e.target.value.toLowerCase();lines.forEach(([l,x])=>l.style.strokeOpacity=!q||x.rbp_gene.toLowerCase().includes(q)||x.junction_id.toLowerCase().includes(q)? .8:.03)};</script>'''.replace('DATA',data)
   (out/'matching_map.html').write_text(html)
-  (out/'analysis_summary.json').write_text(json.dumps(dict(cohort=cohort,tissue=tissue.name,samples=len(samples),complete_cases=int(valid.sum()),covariates=covused,tested_events=tested_events,tested_pairs=len(res),significant_pairs=len(sig),fdr_threshold=a.fdr,shared_cluster='junctions connected by shared splice site; pooled junction reads >= 5',coordinate_convention='junc end + 1; compare exon-end to next exon-start',map_edges=min(len(sig),a.max_map_edges)),indent=2))
-  print(cohort,tissue.name,'tested pairs',len(res),'significant',len(sig),flush=True)
+  (out/'analysis_summary.json').write_text(json.dumps(dict(cohort=cohort,tissue=tissue.name,samples=len(samples),complete_cases=int(valid.sum()),covariates=covused,tested_events=tested_events,tested_pairs=total_pairs,significant_pairs=len(sig),fdr_threshold=a.fdr,shared_cluster='junctions connected by shared splice site; pooled junction reads >= 5',coordinate_convention='junc end + 1; compare exon-end to next exon-start',map_edges=min(len(sig),a.max_map_edges)),indent=2))
+  print(cohort,tissue.name,'tested pairs',total_pairs,'significant',len(sig),flush=True)
+  marker.write_text(json.dumps({'settings':fingerprint,'tested_pairs':total_pairs,'significant_pairs':len(sig)}))
 for cohort in (['target','answer'] if a.cohort=='both' else [a.cohort]): run(cohort)
 print('Outputs:',a.outdir,flush=True)
 PY
