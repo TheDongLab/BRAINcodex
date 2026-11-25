@@ -388,7 +388,7 @@ else:
   for item in linked:
     key=(item['original_tissue'],item['sample'])
     if key in rpm_index: continue
-    report=Path(os.environ['TARGET_ROOT'])/item['original_tissue']/'RNAseq'/'Processed'/item['sample']/'bam.summary.txt'
+    report=Path(os.environ['TARGET_ROOT'])/item['original_tissue']/'RNAseq'/'Processed'/item['sample']/'bam.stat'
     try:
       lines=report.read_text().splitlines(); primary=None; supplementary=None
       for line in lines:
