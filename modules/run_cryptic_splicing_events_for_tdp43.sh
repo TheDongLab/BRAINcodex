@@ -421,6 +421,7 @@ for tissue,cell,gene in sorted({(r['tissue'],r['cell_type'],r['gene']) for r in 
     correlation_rows.append(dict(tissue=tissue,cell_type=cell,gene=gene,measure=measure,n_selected=len(group),n_paired=len(paired),rho=rho,pvalue=pvalue,n_absent=sum(r['category']=='Absent' for r in paired),n_sparse=sum(r['category']=='Sparse' for r in paired),n_moderate=sum(r['category']=='Moderate' for r in paired),n_frequent=sum(r['category']=='Frequent' for r in paired),method='Spearman; ordinal categories; same paired samples'))
   from matplotlib.ticker import MaxNLocator, ScalarFormatter
   plot_rng=random.Random(43)
+  gene_color={'UNC13A':'#487895','STMN2':'#df8855','SYNJ2':'#9d72af','PHF2':'#c6a345'}[gene]
   fig,axes=plt.subplots(1,2,figsize=(12,5),constrained_layout=True)
   for ax,measure,title,label,factor in zip(axes,['cryptic_fraction','cryptic_rpm'],['Cryptic junction fraction','Cryptic junction RPM'],['Cryptic fraction (%)','Cryptic junction reads per million\nnonsecondary alignments'],[100,1]):
     record=next(x for x in correlation_rows[-2:] if x['measure']==measure)
@@ -430,8 +431,8 @@ for tissue,cell,gene in sorted({(r['tissue'],r['cell_type'],r['gene']) for r in 
     for i,cat in enumerate(categories):
       values=[r[measure]*factor for r in paired if r['category']==cat]
       if values:
-        ax.boxplot([values],positions=[i],widths=.5,showfliers=False,patch_artist=True,boxprops=dict(facecolor='#a7c5d5',edgecolor='#34556a'),medianprops=dict(color='#213e50'),whiskerprops=dict(color='#34556a'),capprops=dict(color='#34556a'))
-        ax.scatter([i+plot_rng.uniform(-.11,.11) for _ in values],values,s=18,color='#315d77',alpha=.5,zorder=3)
+        ax.boxplot([values],positions=[i],widths=.5,showfliers=False,patch_artist=True,boxprops=dict(facecolor=gene_color,edgecolor=gene_color,alpha=.65),medianprops=dict(color='black'),whiskerprops=dict(color=gene_color),capprops=dict(color=gene_color))
+        ax.scatter([i+plot_rng.uniform(-.11,.11) for _ in values],values,s=18,color=gene_color,alpha=.55,zorder=3)
     if not paired: ax.text(.5,.5,'No samples with both measures',ha='center',va='center',transform=ax.transAxes,wrap=True)
     ax.set_xticks(range(4));ax.set_xticklabels([cat+'\n(n='+str(sum(r['category']==cat for r in paired))+')' for cat in categories],fontsize=9)
     ax.set_xlabel(cell.title()+' pTDP-43 inclusions');ax.set_ylabel(label)
