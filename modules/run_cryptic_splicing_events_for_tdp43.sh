@@ -246,7 +246,7 @@ for tissue in sorted({r['tissue'] for r in linked}):
 write('tdp43_selected_subject_samples.tsv',selected_samples,['tissue','original_tissue','cell_type','gene','subject_id','sample','category','junction_depth','pathology_match','candidate_samples'])
 write('tdp43_mean_cryptic_reads.tsv',summary,['tissue','cell_type','category','gene','n','mean_cryptic_reads','sum_cryptic_reads'])
 # Brown-style exploratory burden: standardize each gene within dataset/tissue
-# across all measured RNA samples, irrespective of pathology; sum only complete
+# using neuronal pTDP-43 absent samples (iPSC: all samples); sum only complete
 # event profiles: two for Answer ALS iPSC motor neurons, four otherwise.
 # These cohort-derived scores are descriptive, not a
 # held-out prediction model. Means and sample SDs are exported for audit.
@@ -256,14 +256,16 @@ path_lookup={(r['dataset'],r['tissue'],r['original_tissue'],r['sample']):r for r
 for dataset,tissue in sorted({(r['dataset'],r['tissue']) for r in rows}):
   rr=[r for r in rows if r['dataset']==dataset and r['tissue']==tissue]
   panel=['unc13a','stmn2'] if dataset=='answer_ALS' and tissue=='iPSC_Motor_Neuron' else genes
+  reference_kind='all_samples_no_pathology' if dataset=='answer_ALS' and tissue=='iPSC_Motor_Neuron' else 'neuronal_ptdp43_absent'
+  ref_rows=rr if reference_kind=='all_samples_no_pathology' else [r for r in rr if path_lookup.get((dataset,tissue,r['original_tissue'],r['sample']),{}).get('tdp43_neuronal')=='Absent']
   params={}
   for gene in genes:
-    values=[float(r[gene+'_cryptic_fraction']) for r in rr if r.get(gene+'_cryptic_fraction','')!='']
+    values=[float(r[gene+'_cryptic_fraction']) for r in ref_rows if r.get(gene+'_cryptic_fraction','')!='']
     mean=statistics.mean(values) if values else None
     sd=statistics.stdev(values) if len(values)>=2 else None
     usable=sd is not None and math.isfinite(sd) and sd>0
     params[gene]=(mean,sd,usable)
-    reference.append(dict(dataset=dataset,tissue=tissue,gene=gene,n_reference=len(values),mean_fraction=mean if mean is not None else '',sd_fraction=sd if sd is not None else '',status='ok' if usable else ('no_values' if not values else 'insufficient_or_zero_variance')))
+    reference.append(dict(dataset=dataset,tissue=tissue,gene=gene,reference_group=reference_kind,n_reference=len(values),mean_fraction=mean if mean is not None else '',sd_fraction=sd if sd is not None else '',status='ok' if usable else ('no_values' if not values else 'insufficient_or_zero_variance')))
   for r in rr:
     matched=path_lookup.get((dataset,tissue,r['original_tissue'],r['sample']),{})
     rec=dict(dataset=dataset,tissue=tissue,original_tissue=r['original_tissue'],sample=r['sample'],subject_id=matched.get('subject_id',''),pathology_match=matched.get('pathology_match',''),tdp43_neuronal=matched.get('tdp43_neuronal',''),tdp43_glial=matched.get('tdp43_glial',''))
@@ -277,10 +279,10 @@ for dataset,tissue in sorted({(r['dataset'],r['tissue']) for r in rows}):
       if gene in panel:
         if z is None: missing.append(gene)
         else: zs.append(z)
-    rec.update(score_panel=','.join(panel),panel_size=len(panel),n_events=len(zs),missing_events=','.join(missing),tdp43_lof_zsum=sum(zs) if len(zs)==len(panel) else '',tdp43_lof_zmean=sum(zs)/len(panel) if len(zs)==len(panel) else '',score_status='complete' if len(zs)==len(panel) else 'incomplete')
+    rec.update(reference_group=reference_kind,score_panel=','.join(panel),panel_size=len(panel),n_events=len(zs),missing_events=','.join(missing),tdp43_lof_zsum=sum(zs) if len(zs)==len(panel) else '',tdp43_lof_zmean=sum(zs)/len(panel) if len(zs)==len(panel) else '',score_status='complete' if len(zs)==len(panel) else 'incomplete')
     score_rows.append(rec)
-write('tdp43_lof_zscore_reference.tsv',reference,['dataset','tissue','gene','n_reference','mean_fraction','sd_fraction','status'])
-score_fields=['dataset','tissue','original_tissue','sample','subject_id','pathology_match','tdp43_neuronal','tdp43_glial']+[x for g in genes for x in (g+'_junction_depth',g+'_cryptic_fraction',g+'_z')]+['score_panel','panel_size','n_events','missing_events','tdp43_lof_zsum','tdp43_lof_zmean','score_status']
+write('tdp43_lof_zscore_reference.tsv',reference,['dataset','tissue','gene','reference_group','n_reference','mean_fraction','sd_fraction','status'])
+score_fields=['dataset','tissue','original_tissue','sample','subject_id','pathology_match','tdp43_neuronal','tdp43_glial']+[x for g in genes for x in (g+'_junction_depth',g+'_cryptic_fraction',g+'_z')]+['reference_group','score_panel','panel_size','n_events','missing_events','tdp43_lof_zsum','tdp43_lof_zmean','score_status']
 write('tdp43_lof_zscores.tsv',score_rows,score_fields)
 # Show the score distribution across all samples and by neuronal pathology.
 # Each point is an RNA sample; multiple samples may come from one subject.
@@ -289,6 +291,29 @@ rng=random.Random(43)
 for dataset,tissue in sorted({(r['dataset'],r['tissue']) for r in score_rows}):
   cohort=[r for r in score_rows if r['dataset']==dataset and r['tissue']==tissue]
   complete=[r for r in cohort if r['score_status']=='complete']
+  # STMN2 uses every sample with a valid STMN2 Z score, independently of
+  # whether the other panel events are measurable.
+  stmn=[r for r in cohort if r['stmn2_z']!='']
+  fig_st,ax_st=plt.subplots(1,2,figsize=(11,4.5),constrained_layout=True)
+  if stmn:
+    vals_st=[r['stmn2_z'] for r in stmn]
+    ax_st[0].hist(vals_st,bins=min(20,max(5,int(math.sqrt(len(vals_st))))),color='#487895',edgecolor='white')
+    ax_st[0].axvline(0,color='black',lw=1,ls='--')
+  else: ax_st[0].text(.5,.5,'STMN2 Z scores unavailable: check reference table',ha='center',va='center',wrap=True,transform=ax_st[0].transAxes)
+  ax_st[0].set_xlabel('STMN2 Z score');ax_st[0].set_ylabel('RNA samples');ax_st[0].set_title(f'Measurable STMN2 Z scores: {len(stmn)}/{len(cohort)} samples')
+  has_path=False
+  for k,cat in enumerate(['Absent','Sparse','Moderate','Frequent']):
+    v=[r['stmn2_z'] for r in stmn if r['tdp43_neuronal']==cat]
+    if v:
+      has_path=True
+      ax_st[1].boxplot([v],positions=[k],widths=.5,showfliers=False,patch_artist=True,boxprops=dict(facecolor='#9bbacb'),medianprops=dict(color='black'))
+      ax_st[1].scatter([k+rng.uniform(-.12,.12) for _ in v],v,s=14,alpha=.55,color='#31566c')
+    ax_st[1].text(k,1.02,'n='+str(len(v)),ha='center',transform=ax_st[1].get_xaxis_transform(),fontsize=9)
+  if not has_path: ax_st[1].text(.5,.5,'No matched neuronal pTDP-43 scores',ha='center',va='center',wrap=True,transform=ax_st[1].transAxes)
+  ax_st[1].set_xticks(range(4));ax_st[1].set_xticklabels(['Absent','Sparse','Moderate','Frequent'],rotation=20);ax_st[1].set_xlabel('Neuronal pTDP-43 inclusions');ax_st[1].set_ylabel('STMN2 Z score');ax_st[1].axhline(0,color='black',lw=.8,ls='--')
+  ref_label='all-sample reference' if dataset=='answer_ALS' and tissue=='iPSC_Motor_Neuron' else 'neuronal pTDP-43 absent reference'
+  fig_st.suptitle(dataset+' | '+tissue+' — STMN2 ('+ref_label+')')
+  fig_st.savefig(out/f'{dataset}_{tissue}_stmn2_zscore.png',dpi=170);plt.close(fig_st)
   if dataset=='answer_ALS' and tissue=='iPSC_Motor_Neuron':
     fig,ax=plt.subplots(figsize=(7,4.5),constrained_layout=True)
     vals=[r['tdp43_lof_zsum'] for r in complete]
@@ -320,7 +345,7 @@ for dataset,tissue in sorted({(r['dataset'],r['tissue']) for r in score_rows}):
     axes[1].text(i,1.02,'n='+str(len(v)),ha='center',transform=axes[1].get_xaxis_transform(),fontsize=9)
   if not has_groups: axes[1].text(.5,.5,'No matched neuronal pathology for complete scores',ha='center',va='center',transform=axes[1].transAxes,wrap=True)
   axes[1].set_xticks(range(4));axes[1].set_xticklabels(categories,rotation=20);axes[1].set_xlabel('Neuronal pTDP-43 inclusions');axes[1].set_ylabel('Sum of four event Z scores')
-  axes[1].axhline(0,color='black',lw=.8,ls='--');fig.suptitle(dataset+' | '+tissue+' — exploratory TDP-43 cryptic burden')
+  axes[1].axhline(0,color='black',lw=.8,ls='--');fig.suptitle(dataset+' | '+tissue+' — exploratory TDP-43 cryptic burden (neuronal pTDP-43 absent reference)')
   fig.savefig(out/f'{dataset}_{tissue}_tdp43_lof_zscore.png',dpi=170);plt.close(fig)
 with (out/'issues.tsv').open('w') as f:
   w=csv.writer(f,delimiter='\t');w.writerow(['file','issue']);w.writerows(issues)
