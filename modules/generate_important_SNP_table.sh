@@ -376,75 +376,192 @@ for tissue in TISSUES:
                         out.at[snp, f'{q}_HEIDI_pass'] = True
                 except Exception:
                     pass
-for tissue in TISSUES:
+# AnswerALS uses explicit schemas; TargetALS retains the legacy reader below.
+def import_answer_coloc():
+    audit_rows, locus_rows = [], []
+    def number(v):
+        try:
+            x = float(v)
+            return x if np.isfinite(x) else np.nan
+        except (TypeError, ValueError):
+            return np.nan
+    def cs_read(path):
+        result = {}
+        if not path.is_file():
+            raise FileNotFoundError(path)
+        for r in read_table(path).to_dict('records'):
+            if r.get('status') != 'OK':
+                continue
+            result[str(int(float(r['credible_set'])))] = set(str(r['snps']).split(';'))
+        return result
+    def resolve_cs(sets, idx, hit):
+        key = str(int(float(idx)))
+        if key in sets and hit in sets[key]:
+            return key, sets[key]
+        # Exported set numbers can differ from the original SuSiE component IDs.
+        matches = [(k, v) for k, v in sets.items() if hit in v]
+        if len(matches) != 1:
+            raise ValueError(f'Cannot uniquely map signal idx={idx}, hit={hit} to exported credible sets')
+        return matches[0]
     for q in QTLS:
-        droot = ROOT / tissue / 'MR' / f'{q}_SuSiE_coloc'
-        if not droot.exists():
-            continue
-        print(f'Scanning SuSiE/coloc: {q} {tissue}', flush=True)
-        for f in droot.rglob('*.tsv*'):
-            try:
-                d = read_table(f)
-            except Exception:
-                continue
-            sc = find_col(d.columns, ['candidate_snp', 'snp', 'snpid', 'rsid', 'variant'])
-            if sc is None:
-                continue
-            pph4c = find_col(d.columns, ['PPH4', 'PP.H4', 'H4'])
-            h4pass = find_col(d.columns, ['H4_reference_pass', 'H4_pass', 'coloc_pass'])
-            pipc = find_col(d.columns, ['PIP', 'susie_pip', 'posterior_inclusion_probability'])
-            csc = find_col(d.columns, ['credible_set', 'in_credible_set', 'cs'])
-            trait_col = find_col(d.columns, ['geneid', 'gene_id', 'gene', 'gene_symbol', 'probeID', 'probe_id', 'junction_id', 'junctionid', 'circ_id', 'circid', 'phenotype_id', 'event_id'])
-            if not any([pph4c, h4pass, pipc, csc]):
-                continue
-            for (_, r) in d.iterrows():
-                snp = clean_snp(r.get(sc))
-                if snp not in out.index:
+        summary_file = ROOT / 'MR' / f'{q}_SuSiE_coloc_summary.tsv'
+        if not summary_file.is_file():
+            raise FileNotFoundError(f'Required completed coloc summary: {summary_file}')
+        summary = read_table(summary_file)
+        trait_col = {'eQTL':'geneid', 'sQTL':'junction_id', 'cQTL':'circ_id', 'circ_eQTL':'circ_id'}[q]
+        required = {'tissue', trait_col, 'max_PP_H4', 'status'}
+        if not required.issubset(summary):
+            raise ValueError(f'{summary_file}: missing {required-set(summary.columns)}')
+        summary = summary[summary.tissue.isin(TISSUES)].copy()
+        if summary.duplicated(['tissue',trait_col]).any():
+            raise ValueError(f'Duplicate locus summaries: {summary_file}')
+        # Use completed task summaries to locate array outputs without mixing runs.
+        array_index = defaultdict(list)
+        run_parent = ROOT / 'MR' / f'{q}_SuSiE_coloc_runs'
+        override = os.environ.get(f'{q.upper()}_COLOC_RUN_ROOT')
+        runs = [Path(override).expanduser()] if override else sorted(run_parent.glob('*'))
+        for run in runs:
+            for sf in sorted((run/'task_summaries').glob('task_*.tsv')):
+                td = read_table(sf)
+                if trait_col not in td or 'tissue' not in td:
                     continue
-                if trait_col:
-                    trait = clean_value(r.get(trait_col))
-                    if trait:
-                        for g in genes_for_trait(trait, q):
-                            add_gene(snp, g)
-                if pph4c:
-                    try:
-                        x = float(r[pph4c])
-                        old = out.at[snp, f'{q}_best_PPH4']
-                        if pd.isna(old) or x > old:
-                            out.at[snp, f'{q}_best_PPH4'] = x
-                    except Exception:
-                        pass
-                passed = False
-                if h4pass:
-                    v = str(r[h4pass]).strip().lower()
-                    passed = v in {'true', 't', '1', 'yes', 'pass'}
-                elif pph4c:
-                    try:
-                        passed = float(r[pph4c]) >= 0.8
-                    except Exception:
-                        pass
-                if passed:
-                    out.at[snp, f'{q}_coloc_significant'] = True
-                    coloc_tissues[q][snp].add(tissue)
-                if pipc:
-                    try:
-                        x = float(r[pipc])
-                        old = out.at[snp, f'{q}_best_PIP']
-                        if pd.isna(old) or x > old:
-                            out.at[snp, f'{q}_best_PIP'] = x
-                    except Exception:
-                        pass
-                if csc:
-                    v = str(r[csc]).strip().lower()
-                    is_member = v in {'true', 't', 'yes', 'y'}
-                    if not is_member:
+                for r in td.to_dict('records'):
+                    array_index[(r['tissue'],r[trait_col])].append((run/'task_outputs'/sf.stem/r['tissue'],number(r.get('max_PP_H4'))))
+        pip_col = {'eQTL':'eqtl_pip','sQTL':'sqtl_pip','cQTL':'cqtl_pip','circ_eQTL':'eqtl_pip'}[q]
+        cs_name = {'eQTL':'eQTL','sQTL':'sQTL','cQTL':'cQTL','circ_eQTL':'eQTL'}[q]+'_credible_sets.tsv'
+        n_positive = 0
+        for rec in summary.to_dict('records'):
+            tissue, trait = rec['tissue'],rec[trait_col]
+            expected = number(rec.get('max_PP_H4'))
+            ncs = number(rec.get({'eQTL':'n_eQTL_CS','sQTL':'n_sQTL_CS','cQTL':'n_cQTL_CS','circ_eQTL':'n_eQTL_CS'}[q]))
+            if not np.isfinite(expected) and not (ncs > 0):
+                continue
+            safe = 'circ__'+trait.encode().hex() if q=='circ_eQTL' else re.sub('[^A-Za-z0-9_.-]','_',trait)
+            candidates = []
+            entries = array_index.get((tissue,trait),[])
+            for directory,h4 in entries:
+                if (np.isnan(expected) and np.isnan(h4)) or (np.isfinite(expected) and np.isclose(h4,expected,rtol=1e-10,atol=1e-12)):
+                    candidates.append(directory/safe)
+            if not entries:
+                old = ROOT/tissue/'MR'/f'{q}_SuSiE_coloc'
+                candidates = list(old.glob(trait+'__*')) if q=='eQTL' else [old/safe]
+            candidates = [p for p in candidates if (p/'PIP.tsv').is_file()]
+            if len(candidates)!=1:
+                raise ValueError(f'{q} {trait}: expected one detail directory, found {len(candidates)}; choose a run with {q.upper()}_COLOC_RUN_ROOT if needed')
+            detail = candidates[0]
+            pip = read_table(detail/'PIP.tsv')
+            if not {'snp',pip_col}.issubset(pip):
+                raise ValueError(f'Unexpected PIP schema: {detail}')
+            for snp,v in zip(pip['snp'],pip[pip_col]):
+                if snp in out.index:
+                    x=number(v); old=out.at[snp,f'{q}_best_PIP']
+                    if np.isfinite(x) and (pd.isna(old) or x>old): out.at[snp,f'{q}_best_PIP']=x
+            sets1=cs_read(detail/cs_name)
+            for snp in set().union(*sets1.values()) if sets1 else set():
+                if snp in out.index: out.at[snp,f'{q}_SuSiE_credible_set']=True
+            if not np.isfinite(expected):
+                continue
+            c=read_table(detail/'coloc_susie.tsv')
+            if not {'PP.H4.abf','idx1','idx2','hit1','hit2'}.issubset(c):
+                raise ValueError(f'Unexpected coloc schema: {detail}')
+            h=pd.to_numeric(c['PP.H4.abf'],errors='coerce')
+            if not np.isclose(h.max(),expected,rtol=1e-10,atol=1e-12):
+                raise ValueError(f'Summary/detail PP.H4 mismatch: {detail}')
+            if expected>=.8: n_positive+=1
+            sets2=cs_read(detail/'GWAS_credible_sets.tsv')
+            for signal in c[h.notna()].to_dict('records'):
+                k1,s1=resolve_cs(sets1,signal['idx1'],signal['hit1'])
+                k2,s2=resolve_cs(sets2,signal['idx2'],signal['hit2'])
+                shared=s1&s2; h4=float(signal['PP.H4.abf'])
+                if not shared:
+                    audit_rows.append(dict(qtl_type=q,tissue=tissue,trait=trait,PP_H4=h4,idx1=signal['idx1'],idx2=signal['idx2'],qtl_set=k1,gwas_set=k2,SNP='',status='no_shared_credible_set_SNP',detail_dir=str(detail)))
+                for snp in sorted(shared):
+                    present=snp in out.index
+                    audit_rows.append(dict(qtl_type=q,tissue=tissue,trait=trait,PP_H4=h4,idx1=signal['idx1'],idx2=signal['idx2'],qtl_set=k1,gwas_set=k2,SNP=snp,status='imported' if present else 'absent_from_GWAS_universe',detail_dir=str(detail)))
+                    if not present: continue
+                    old=out.at[snp,f'{q}_best_PPH4']
+                    if pd.isna(old) or h4>old: out.at[snp,f'{q}_best_PPH4']=h4
+                    if h4>=.8:
+                        out.at[snp,f'{q}_coloc_significant']=True
+                        coloc_tissues[q][snp].add(tissue)
+                    for g in genes_for_trait(trait,q): add_gene(snp,g)
+            locus_rows.append(dict(qtl_type=q,tissue=tissue,trait=trait,max_PP_H4=expected,detail_dir=str(detail)))
+        print(f'AnswerALS {q}: {n_positive} loci with PP.H4 >= 0.8 imported from completed summary',flush=True)
+    pd.DataFrame(audit_rows,columns=['qtl_type','tissue','trait','PP_H4','idx1','idx2','qtl_set','gwas_set','SNP','status','detail_dir']).to_csv(OUTDIR/'ALS_coloc_SNP_link_audit.tsv',sep='\t',index=False)
+    pd.DataFrame(locus_rows,columns=['qtl_type','tissue','trait','max_PP_H4','detail_dir']).to_csv(OUTDIR/'ALS_coloc_locus_audit.tsv',sep='\t',index=False)
+
+if os.environ['EXPERIMENT'] == 'answer_ALS':
+    import_answer_coloc()
+else:
+    for tissue in TISSUES:
+        for q in QTLS:
+            droot = ROOT / tissue / 'MR' / f'{q}_SuSiE_coloc'
+            if not droot.exists():
+                continue
+            print(f'Scanning SuSiE/coloc: {q} {tissue}', flush=True)
+            for f in droot.rglob('*.tsv*'):
+                try:
+                    d = read_table(f)
+                except Exception:
+                    continue
+                sc = find_col(d.columns, ['candidate_snp', 'snp', 'snpid', 'rsid', 'variant'])
+                if sc is None:
+                    continue
+                pph4c = find_col(d.columns, ['PPH4', 'PP.H4', 'H4'])
+                h4pass = find_col(d.columns, ['H4_reference_pass', 'H4_pass', 'coloc_pass'])
+                pipc = find_col(d.columns, ['PIP', 'susie_pip', 'posterior_inclusion_probability'])
+                csc = find_col(d.columns, ['credible_set', 'in_credible_set', 'cs'])
+                trait_col = find_col(d.columns, ['geneid', 'gene_id', 'gene', 'gene_symbol', 'probeID', 'probe_id', 'junction_id', 'junctionid', 'circ_id', 'circid', 'phenotype_id', 'event_id'])
+                if not any([pph4c, h4pass, pipc, csc]):
+                    continue
+                for (_, r) in d.iterrows():
+                    snp = clean_snp(r.get(sc))
+                    if snp not in out.index:
+                        continue
+                    if trait_col:
+                        trait = clean_value(r.get(trait_col))
+                        if trait:
+                            for g in genes_for_trait(trait, q):
+                                add_gene(snp, g)
+                    if pph4c:
                         try:
-                            cs_number = float(v)
-                            is_member = np.isfinite(cs_number) and cs_number > 0 and cs_number.is_integer()
-                        except (TypeError, ValueError):
+                            x = float(r[pph4c])
+                            old = out.at[snp, f'{q}_best_PPH4']
+                            if pd.isna(old) or x > old:
+                                out.at[snp, f'{q}_best_PPH4'] = x
+                        except Exception:
                             pass
-                    if is_member:
-                        out.at[snp, f'{q}_SuSiE_credible_set'] = True
+                    passed = False
+                    if h4pass:
+                        v = str(r[h4pass]).strip().lower()
+                        passed = v in {'true', 't', '1', 'yes', 'pass'}
+                    elif pph4c:
+                        try:
+                            passed = float(r[pph4c]) >= 0.8
+                        except Exception:
+                            pass
+                    if passed:
+                        out.at[snp, f'{q}_coloc_significant'] = True
+                        coloc_tissues[q][snp].add(tissue)
+                    if pipc:
+                        try:
+                            x = float(r[pipc])
+                            old = out.at[snp, f'{q}_best_PIP']
+                            if pd.isna(old) or x > old:
+                                out.at[snp, f'{q}_best_PIP'] = x
+                        except Exception:
+                            pass
+                    if csc:
+                        v = str(r[csc]).strip().lower()
+                        is_member = v in {'true', 't', 'yes', 'y'}
+                        if not is_member:
+                            try:
+                                cs_number = float(v)
+                                is_member = np.isfinite(cs_number) and cs_number > 0 and cs_number.is_integer()
+                            except (TypeError, ValueError):
+                                pass
+                        if is_member:
+                            out.at[snp, f'{q}_SuSiE_credible_set'] = True
 for q in QTLS:
     for (snp, v) in qtl_tissues[q].items():
         out.at[snp, f'{q}_tissues'] = ';'.join(sorted(v))
