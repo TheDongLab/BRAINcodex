@@ -105,7 +105,7 @@ for tissue in tissues:
   counts=Counter(y); k=min(fold_max,counts.get(0,0),counts.get(1,0)); key=dict(tissue=tissue,cell_type=cell,n_subjects=len(eligible),n_absent=counts.get(0,0),n_positive=counts.get(1,0))
   if k<2:
    statuses.append(dict(**key,status='insufficient_both_classes',detail='Need at least two subjects in each binary class with all four events measurable.'));continue
-  X=np.asarray([r['values'] for r in eligible],float); assignment=folds(y,k,random.Random(seed)); pred=np.full((len(y),3),np.nan); fold_error=None; composite_error=[]
+  X=np.asarray([r['values'] for r in eligible],float); assignment=folds(y,k,random.Random(seed)); pred=np.full((len(y),4),np.nan); fold_error=None; composite_error=[]
   for fold in range(k):
    train=assignment!=fold; test=~train
    # Composite parameters estimated only from absent training subjects, consistent
@@ -118,23 +118,24 @@ for tissue in tissues:
     pred[test,0]=predict(fit_logistic(X[train,1:2],y[train]),X[test,1:2])
     if not np.any(~np.isfinite(sd)) and np.all(sd>0): pred[test,1]=((X[test]-mu)/sd).mean(axis=1)
     pred[test,2]=predict(fit_logistic(X[train],y[train]),X[test])
+    pred[test,3]=X[test].mean(axis=1)
    except Exception as e: fold_error='Fold %d: %s'%(fold+1,e);break
   if fold_error:
    statuses.append(dict(**key,status='invalid_training_fold',detail=fold_error));continue
   if composite_error: pred[:,1]=np.nan
   statuses.append(dict(**key,status='ok_composite_unavailable' if composite_error else 'ok',detail=('; '.join(composite_error) if composite_error else f'{k}-fold stratified subject-level cross-validation; complete cases')))
-  names=('stmn2','equal_weight_composite','four_event_model')
+  names=('stmn2','equal_weight_composite','four_event_model','equal_weight_fraction')
   for i,r in enumerate(eligible):
-   predictions.append(dict(tissue=tissue,cell_type=cell,subject_id=r['subject'],sample=r['sample'],original_tissue=r['original_tissue'],pathology_match=r['pathology_match'],category=r['category'],binary_outcome=r['y'],fold=assignment[i]+1,stmn2_fraction=X[i,1],stmn2_prediction=pred[i,0],composite_score=pred[i,1],four_event_prediction=pred[i,2]))
-  rng=np.random.default_rng(seed); distributions={n:[] for n in names}; diffs={'stmn2_minus_composite':[],'four_event_minus_stmn2':[]}
+   predictions.append(dict(tissue=tissue,cell_type=cell,subject_id=r['subject'],sample=r['sample'],original_tissue=r['original_tissue'],pathology_match=r['pathology_match'],category=r['category'],binary_outcome=r['y'],fold=assignment[i]+1,stmn2_fraction=X[i,1],stmn2_prediction=pred[i,0],composite_score=pred[i,1],four_event_prediction=pred[i,2],equal_weight_fraction=pred[i,3]))
+  rng=np.random.default_rng(seed); distributions={n:[] for n in names}; diffs={'stmn2_minus_composite':[],'four_event_minus_stmn2':[],'stmn2_minus_equal_fraction':[]}
   # Stratified subject bootstrap resamples the already held-out predictions;
   # it quantifies uncertainty conditional on these fitted CV predictions.
   neg=np.flatnonzero(y==0);pos=np.flatnonzero(y==1)
   for b in range(boot_n):
    ix=np.concatenate((rng.choice(neg,len(neg),replace=True),rng.choice(pos,len(pos),replace=True)))
-   vals=[auc(y[ix],pred[ix,j]) for j in range(3)]
+   vals=[auc(y[ix],pred[ix,j]) for j in range(4)]
    for name,v in zip(names,vals): distributions[name].append(v)
-   diffs['stmn2_minus_composite'].append(vals[0]-vals[1]);diffs['four_event_minus_stmn2'].append(vals[2]-vals[0])
+   diffs['stmn2_minus_composite'].append(vals[0]-vals[1]);diffs['four_event_minus_stmn2'].append(vals[2]-vals[0]);diffs['stmn2_minus_equal_fraction'].append(vals[0]-vals[3])
   for j,name in enumerate(names):
    if not np.all(np.isfinite(pred[:,j])): continue
    lo,hi=np.percentile(distributions[name],[2.5,97.5]);metrics.append(dict(**key,model=name,auc=auc(y,pred[:,j]),ci_low=lo,ci_high=hi,folds=k,bootstrap_replicates=boot_n))
@@ -146,20 +147,19 @@ for tissue in tissues:
     severity.append(dict(tissue=tissue,cell_type=cell,category=cat,model=name,n=len(v),median_prediction=statistics.median(v) if v else ''))
   for name,v in diffs.items():
    if not np.all(np.isfinite(v)): continue
-   estimate=auc(y,pred[:,0])-auc(y,pred[:,1]) if name=='stmn2_minus_composite' else auc(y,pred[:,2])-auc(y,pred[:,0]);lo,hi=np.percentile(v,[2.5,97.5])
+   estimate={'stmn2_minus_composite':lambda:auc(y,pred[:,0])-auc(y,pred[:,1]),'four_event_minus_stmn2':lambda:auc(y,pred[:,2])-auc(y,pred[:,0]),'stmn2_minus_equal_fraction':lambda:auc(y,pred[:,0])-auc(y,pred[:,3])}[name]();lo,hi=np.percentile(v,[2.5,97.5])
    bootstrap.append(dict(**key,comparison=name,auc_difference=estimate,ci_low=lo,ci_high=hi,bootstrap_replicates=boot_n))
   fig,axes=plt.subplots(1,2,figsize=(12,5),constrained_layout=True)
   for j,name in enumerate(names):
    if not np.all(np.isfinite(pred[:,j])): continue
    ps=pred[:,j]; thresholds=np.r_[np.inf,np.sort(np.unique(ps))[::-1],-np.inf];fpr=[np.mean(ps[y==0]>=t) for t in thresholds];tpr=[np.mean(ps[y==1]>=t) for t in thresholds]
-   axes[0].plot(fpr,tpr,label=f'{name}: AUC {auc(y,ps):.2f}')
+   axes[0].plot(fpr,tpr,color={'stmn2':'#0072B2','equal_weight_composite':'#D55E00','four_event_model':'#009E73','equal_weight_fraction':'#CC79A7'}[name],label=f"{dict(stmn2='STMN2 alone', equal_weight_composite='Equal-weight Z score', four_event_model='Fitted four-event model', equal_weight_fraction='Equal-weight raw fractions')[name]}: AUC {auc(y,ps):.2f}")
   axes[0].plot([0,1],[0,1],color='grey',ls='--');axes[0].set(xlabel='False positive rate',ylabel='True positive rate',title='Held-out predictions; same subjects');axes[0].legend(fontsize=8)
   for i,cat in enumerate(cats):
    v=[pred[j,0] for j,r in enumerate(eligible) if r['category']==cat]
    if v:
-    axes[1].boxplot([v],positions=[i],widths=.5,showfliers=True);axes[1].scatter([i]*len(v),v,s=12,alpha=.4)
-   axes[1].text(i,1.02,'n='+str(len(v)),transform=axes[1].get_xaxis_transform(),ha='center')
-  axes[1].set_xticks(range(4));axes[1].set_xticklabels(cats,rotation=20);axes[1].set(xlabel=cell.title()+' pTDP-43 category',ylabel='Held-out STMN2 predicted probability',title='Original ordered categories')
+    axes[1].boxplot([v],positions=[i],widths=.5,showfliers=False,patch_artist=True,boxprops=dict(facecolor='#E6C68A',color='#504334'),medianprops=dict(color='#504334'),whiskerprops=dict(color='#504334'),capprops=dict(color='#504334'));axes[1].scatter([i]*len(v),v,s=12,alpha=.55,color='#765B3D')
+  axes[1].set_xticks(range(4));axes[1].set_xticklabels([cat+'\n(n='+str(sum(r['category']==cat for r in eligible))+')' for cat in cats],rotation=0);axes[1].set(xlabel=cell.title()+' pTDP-43 category',ylabel='Held-out STMN2 predicted probability',title='Original ordered categories')
   fig.suptitle(f'{tissue} | {cell} | Absent vs any inclusions');fig.savefig(out/f'{tissue}_{cell}_prediction_comparison.png',dpi=160);plt.close(fig)
 
 save('subject_selection_audit.tsv',audit,['tissue','cell_type','subject_id','sample','original_tissue','category','pathology_match','status','candidate_samples','stmn2_available','four_available'])
@@ -168,7 +168,7 @@ common=['tissue','cell_type','n_subjects','n_absent','n_positive']
 save('analysis_status.tsv',statuses,common+['status','detail'])
 save('auc_metrics.tsv',metrics,common+['model','auc','ci_low','ci_high','folds','bootstrap_replicates'])
 save('auc_paired_differences.tsv',bootstrap,common+['comparison','auc_difference','ci_low','ci_high','bootstrap_replicates'])
-save('held_out_predictions.tsv',predictions,['tissue','cell_type','subject_id','sample','original_tissue','pathology_match','category','binary_outcome','fold','stmn2_fraction','stmn2_prediction','composite_score','four_event_prediction'])
+save('held_out_predictions.tsv',predictions,['tissue','cell_type','subject_id','sample','original_tissue','pathology_match','category','binary_outcome','fold','stmn2_fraction','stmn2_prediction','composite_score','four_event_prediction','equal_weight_fraction'])
 save('ordered_category_summary.tsv',severity,['tissue','cell_type','category','model','n','median_prediction'])
 save('ordinal_association.tsv',ordinal,['tissue','cell_type','model','n','spearman_rho','interpretation'])
 print('Results:',out,'| completed analyses:',sum(r['status'].startswith('ok') for r in statuses),'| attempted:',len(statuses))
