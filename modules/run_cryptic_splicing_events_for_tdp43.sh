@@ -363,6 +363,75 @@ for dataset,tissue in sorted({(r['dataset'],r['tissue']) for r in score_rows}):
     fig.suptitle(dataset+' | '+tissue+' — available-event cryptic burden ('+reference+')',fontsize=11)
     suffix='_full_range' if full else ''
     fig.savefig(out/f'{dataset}_{tissue}_tdp43_lof_zscore{suffix}.png',dpi=170);plt.close(fig)
+# Compare cryptic junction fraction and cryptic RPM against ordered pTDP-43.
+# RPM_TOTALS optional TSV original_tissue, sample, mapped_reads. Otherwise
+# use flagstat primary + supplementary (samtools view -F 0x100 convention).
+# Missing or invalid denominators are audited.
+rpm_file=os.environ.get('RPM_TOTALS','')
+rpm_index={}; rpm_errors=[]
+if rpm_file:
+  with open(rpm_file,newline='',encoding='utf-8-sig') as f:
+    reader=csv.DictReader(f,delimiter='\t')
+    required={'original_tissue','sample','mapped_reads'}
+    if not required.issubset(reader.fieldnames or []): raise ValueError('RPM_TOTALS needs TSV columns: original_tissue, sample, mapped_reads')
+    for row in reader:
+      key=(row['original_tissue'].strip(),row['sample'].strip())
+      if key in rpm_index: raise ValueError('Duplicate RPM denominator key: '+str(key))
+      try: value=float(row['mapped_reads'])
+      except (ValueError,TypeError): raise ValueError('Invalid mapped_reads for '+str(key))
+      if not math.isfinite(value) or value<=0: raise ValueError('mapped_reads must be finite and positive for '+str(key))
+      rpm_index[key]=value
+else:
+  # Match existing QTL convention: samtools view -F 0x100 -c counts
+  # primary plus supplementary records, excluding secondary alignments.
+  # samtools flagstat reports primary and supplementary separately.
+  for item in linked:
+    key=(item['original_tissue'],item['sample'])
+    if key in rpm_index: continue
+    report=Path(os.environ['TARGET_ROOT'])/item['original_tissue']/'RNAseq'/'Processed'/item['sample']/'bam.summary.txt'
+    try:
+      lines=report.read_text().splitlines(); primary=None; supplementary=None
+      for line in lines:
+        m=re.match(r'^\s*(\d+)\s*\+\s*(\d+)\s+(primary|supplementary)\s*$',line)
+        if m:
+          number=int(m.group(1))+int(m.group(2))
+          if m.group(3)=='primary': primary=number
+          else: supplementary=number
+      if primary is None or supplementary is None or primary+supplementary<=0: raise ValueError('missing primary or supplementary flagstat counts')
+      rpm_index[key]=primary+supplementary
+    except (OSError,ValueError) as e:
+      issues.append([str(report),'RPM denominator unavailable: '+str(e)])
+linked_key={(r['tissue'],r['original_tissue'],r['sample']):r for r in linked}
+correlation_rows=[]; corr_input=[]; categories=['Absent','Sparse','Moderate','Frequent']; order={v:i for i,v in enumerate(categories)}
+for sel in selected_samples:
+  key=(sel['tissue'],sel['original_tissue'],sel['sample']); r=linked_key[key]; g=sel['gene']; cell=sel['cell_type']
+  denom=rpm_index.get((sel['original_tissue'],sel['sample']))
+  crypt=event_reads(r,g)
+  corr_input.append(dict(tissue=sel['tissue'],cell_type=cell,gene=g.upper(),subject_id=sel['subject_id'],sample=sel['sample'],original_tissue=sel['original_tissue'],pathology_match=sel['pathology_match'],category=sel['category'],junction_depth=sel['junction_depth'],cryptic_reads=crypt,cryptic_fraction=float(r[g+'_cryptic_fraction']),mapped_reads=denom if denom is not None else '',cryptic_rpm=crypt*1e6/denom if denom is not None else '',rpm_status=('provided_table' if rpm_file else 'flagstat_primary_plus_supplementary') if denom is not None else 'missing_denominator'))
+write('psi_rpm_subjects.tsv',corr_input,['tissue','cell_type','gene','subject_id','sample','original_tissue','pathology_match','category','junction_depth','cryptic_reads','cryptic_fraction','mapped_reads','cryptic_rpm','rpm_status'])
+for tissue,cell,gene in sorted({(r['tissue'],r['cell_type'],r['gene']) for r in corr_input}):
+  group=[r for r in corr_input if r['tissue']==tissue and r['cell_type']==cell and r['gene']==gene]
+  paired=[r for r in group if r['cryptic_rpm']!='']
+  # Paired samples ensure a fair within-sample comparison of the correlations.
+  for measure in ('cryptic_fraction','cryptic_rpm'):
+    values=[r[measure] for r in paired]; labels=[order[r['category']] for r in paired]
+    rho,pvalue=('', '')
+    if len(values)>=3 and len(set(values))>1 and len(set(labels))>1:
+      result=spearmanr(values,labels);rho=float(result.statistic);pvalue=float(result.pvalue)
+    correlation_rows.append(dict(tissue=tissue,cell_type=cell,gene=gene,measure=measure,n_selected=len(group),n_paired=len(paired),rho=rho,pvalue=pvalue,n_absent=sum(r['category']=='Absent' for r in paired),n_sparse=sum(r['category']=='Sparse' for r in paired),n_moderate=sum(r['category']=='Moderate' for r in paired),n_frequent=sum(r['category']=='Frequent' for r in paired),method='Spearman; ordinal categories; same paired samples'))
+  fig,axes=plt.subplots(1,2,figsize=(11,4.5),constrained_layout=True)
+  for ax,measure,label in zip(axes,['cryptic_fraction','cryptic_rpm'],['Cryptic junction fraction','Cryptic junction reads per million nonsecondary alignments']):
+    for i,cat in enumerate(categories):
+      values=[r[measure] for r in paired if r['category']==cat]
+      if values:
+        ax.boxplot([values],positions=[i],widths=.5,showfliers=True,patch_artist=True,boxprops=dict(facecolor='#9bbacb'),medianprops=dict(color='black'))
+      ax.text(i,1.02,'n='+str(len(values)),transform=ax.get_xaxis_transform(),ha='center',fontsize=8)
+    if not paired: ax.text(.5,.5,'No matched mapped-read totals available',ha='center',va='center',transform=ax.transAxes,wrap=True)
+    ax.set_xticks(range(4));ax.set_xticklabels(categories,rotation=20);ax.set_xlabel(cell.title()+' pTDP-43 inclusions');ax.set_ylabel(label)
+    if measure=='cryptic_rpm': ax.set_yscale('symlog',linthresh=1)
+  fig.suptitle(tissue+' | '+cell+' | '+gene+' — same subjects for both measures')
+  fig.savefig(out/f'{tissue}_{cell}_{gene}_psi_vs_rpm.png',dpi=170);plt.close(fig)
+write('psi_rpm_correlations.tsv',correlation_rows,['tissue','cell_type','gene','measure','n_selected','n_paired','rho','pvalue','n_absent','n_sparse','n_moderate','n_frequent','method'])
 with (out/'issues.tsv').open('w') as f:
   w=csv.writer(f,delimiter='\t');w.writerow(['file','issue']);w.writerows(issues)
 print('Output:',out,'samples:',len(rows),'issues:',len(issues),'minimum circ reads:',mincirc,'minimum competing junction reads:',minj)
