@@ -320,39 +320,49 @@ for dataset,tissue in sorted({(r['dataset'],r['tissue']) for r in score_rows}):
   ref_label='all-sample reference' if dataset=='answer_ALS' and tissue=='iPSC_Motor_Neuron' else 'neuronal pTDP-43 absent reference'
   fig_st.suptitle(dataset+' | '+tissue+' — STMN2 ('+ref_label+')')
   fig_st.savefig(out/f'{dataset}_{tissue}_stmn2_zscore.png',dpi=170);plt.close(fig_st)
-  if dataset=='answer_ALS' and tissue=='iPSC_Motor_Neuron':
-    fig,ax=plt.subplots(figsize=(7,4.5),constrained_layout=True)
-    vals=[r['tdp43_lof_zmean'] for r in complete]
-    if vals:
-      ax.hist(vals,bins=min(20,max(5,int(math.sqrt(len(vals))))),color='#487895',edgecolor='white')
-      ax.axvline(0,color='black',lw=1,ls='--')
-    else: ax.text(.5,.5,'No available event Z scores',ha='center',va='center',transform=ax.transAxes)
-    ax.set_xlabel('Mean of available UNC13A and STMN2 Z scores');ax.set_ylabel('RNA samples')
-    ax.set_title(f'Samples with ≥1 valid event Z score: {len(complete)}/{len(cohort)}')
-    fig.suptitle(dataset+' | '+tissue+' — exploratory two-event TDP-43 cryptic burden')
-    fig.savefig(out/f'{dataset}_{tissue}_tdp43_lof_zscore.png',dpi=170);plt.close(fig)
-    continue
-  fig,axes=plt.subplots(1,2,figsize=(11,4.5),constrained_layout=True)
+  # Two views of identical scores: a readable central range and the full range.
+  # Limits are determined per tissue using the 2.5th and 97.5th percentiles,
+  # with zero included. Box statistics always use all observations.
   vals=[r['tdp43_lof_zmean'] for r in complete]
+  ipsc=dataset=='answer_ALS' and tissue=='iPSC_Motor_Neuron'
   if vals:
-    axes[0].hist(vals,bins=min(20,max(5,int(math.sqrt(len(vals))))),color='#487895',edgecolor='white')
-    axes[0].axvline(0,color='black',lw=1,ls='--')
-  else: axes[0].text(.5,.5,'No available event Z scores',ha='center',va='center',transform=axes[0].transAxes)
-  axes[0].set_xlabel('Mean of available event Z scores');axes[0].set_ylabel('RNA samples')
-  axes[0].set_title(f'Samples with ≥1 valid event Z score: {len(complete)}/{len(cohort)}')
-  categories=['Absent','Sparse','Moderate','Frequent']
-  has_groups=False
-  for i,category in enumerate(categories):
-    v=[r['tdp43_lof_zmean'] for r in complete if r['tdp43_neuronal']==category]
-    if v:
-      has_groups=True
-      axes[1].boxplot([v],positions=[i],widths=.5,showfliers=False,patch_artist=True,boxprops=dict(facecolor='#9bbacb'),medianprops=dict(color='black'))
-      axes[1].scatter([i+rng.uniform(-.12,.12) for _ in v],v,s=14,alpha=.55,color='#31566c')
-    axes[1].text(i,1.02,'n='+str(len(v)),ha='center',transform=axes[1].get_xaxis_transform(),fontsize=9)
-  if not has_groups: axes[1].text(.5,.5,'No matched neuronal pathology for scored samples',ha='center',va='center',transform=axes[1].transAxes,wrap=True)
-  axes[1].set_xticks(range(4));axes[1].set_xticklabels(categories,rotation=20);axes[1].set_xlabel('Neuronal pTDP-43 inclusions');axes[1].set_ylabel('Mean of available event Z scores')
-  axes[1].axhline(0,color='black',lw=.8,ls='--');fig.suptitle(dataset+' | '+tissue+' — exploratory TDP-43 cryptic burden (neuronal pTDP-43 absent reference)')
-  fig.savefig(out/f'{dataset}_{tissue}_tdp43_lof_zscore.png',dpi=170);plt.close(fig)
+    sv=sorted(vals)
+    def quantile(q):
+      pos=(len(sv)-1)*q; lo=int(pos); hi=min(lo+1,len(sv)-1)
+      return sv[lo]+(sv[hi]-sv[lo])*(pos-lo)
+    low=min(0.0,quantile(.025)); high=max(0.0,quantile(.975))
+    if high<=low: low-=.5;high+=.5
+    pad=(high-low)*.05; low-=pad;high+=pad
+  else: low,high=-1.0,1.0
+  for full in (False,True):
+    fig,axes=plt.subplots(1,1 if ipsc else 2,figsize=(7 if ipsc else 12,4.8),constrained_layout=True)
+    if ipsc: axes=[axes]
+    shown=vals if full else [v for v in vals if low<=v<=high]
+    below=sum(v<low for v in vals); above=sum(v>high for v in vals)
+    if shown:
+      axes[0].hist(shown,bins=min(20,max(5,int(math.sqrt(len(shown))))),color='#487895',edgecolor='white')
+      axes[0].axvline(0,color='black',lw=1,ls='--')
+    else: axes[0].text(.5,.5,'No available event Z scores in displayed range',ha='center',va='center',wrap=True,transform=axes[0].transAxes)
+    if not full: axes[0].set_xlim(low,high)
+    axes[0].set_xlabel('Mean of available event Z scores');axes[0].set_ylabel('RNA samples')
+    axes[0].set_title(f'Scored: {len(complete)}/{len(cohort)} samples'+(' | full range' if full else f' | outside view: {below} below, {above} above'),fontsize=10)
+    if not ipsc:
+      categories=['Absent','Sparse','Moderate','Frequent']; has_groups=False
+      for i,category in enumerate(categories):
+        v=[r['tdp43_lof_zmean'] for r in complete if r['tdp43_neuronal']==category]
+        if v:
+          has_groups=True
+          axes[1].boxplot([v],positions=[i],widths=.5,showfliers=False,patch_artist=True,boxprops=dict(facecolor='#9bbacb'),medianprops=dict(color='black'))
+          axes[1].scatter([i+rng.uniform(-.12,.12) for _ in v],v,s=14,alpha=.55,color='#31566c')
+        outside=sum(x<low or x>high for x in v)
+        axes[1].text(i,1.02,f'n={len(v)}'+('' if full else f' | outside={outside}'),ha='center',transform=axes[1].get_xaxis_transform(),fontsize=8)
+      if not has_groups: axes[1].text(.5,.5,'No matched neuronal pathology for scored samples',ha='center',va='center',wrap=True,transform=axes[1].transAxes)
+      if not full: axes[1].set_ylim(low,high)
+      axes[1].set_xticks(range(4));axes[1].set_xticklabels(categories,rotation=20);axes[1].set_xlabel('Neuronal pTDP-43 inclusions');axes[1].set_ylabel('Mean of available event Z scores');axes[1].axhline(0,color='black',lw=.8,ls='--')
+    reference='all-sample reference; two-event panel' if ipsc else 'neuronal pTDP-43 absent reference'
+    fig.suptitle(dataset+' | '+tissue+' — available-event cryptic burden ('+reference+')',fontsize=11)
+    suffix='_full_range' if full else ''
+    fig.savefig(out/f'{dataset}_{tissue}_tdp43_lof_zscore{suffix}.png',dpi=170);plt.close(fig)
 with (out/'issues.tsv').open('w') as f:
   w=csv.writer(f,delimiter='\t');w.writerow(['file','issue']);w.writerows(issues)
 print('Output:',out,'samples:',len(rows),'issues:',len(issues),'minimum circ reads:',mincirc,'minimum competing junction reads:',minj)
