@@ -5,6 +5,7 @@
 #SBATCH --cpus-per-task=1
 #SBATCH --output=/home/zw529/donglab/data/target_ALS/QTL/tdp43_ce_detection.out
 #SBATCH --error=/home/zw529/donglab/data/target_ALS/QTL/tdp43_ce_detection.err
+
 set -euo pipefail
 module purge
 unset PYTHONPATH PYTHONHOME
@@ -91,6 +92,41 @@ for tissue in sorted({r['tissue'] for r in data if r['dataset']=='target_ALS'}):
   ax.legend(handles=[Patch(color=colors[g],label=g.upper()) for g in genes],frameon=False,ncol=4,loc='upper center',bbox_to_anchor=(.5,-.17))
   ax.set_xticks(range(4));ax.set_xticklabels(cats);ax.set_ylim(0,115);ax.set_ylabel('Subjects with detected cryptic junction (%)');ax.set_xlabel(cell.title()+' pTDP-43 inclusions');ax.set_title(tissue+' | '+cell+' | ≥2 cryptic reads; '+str(minimum)+' total junction reads')
   fig.savefig(out/f'{tissue}_{cell}_ce_detection.png',dpi=170,bbox_inches='tight');plt.close(fig)
+# Coverage figures and matched-subject detection comparison.
+# Event depth means cryptic + selected canonical junction reads, not library size.
+paired=[]
+for tissue,cell in sorted({(r['tissue'],r['cell_type']) for r in individual}):
+ rows=[r for r in individual if r['tissue']==tissue and r['cell_type']==cell]
+ by_subject=defaultdict(dict)
+ for r in rows: by_subject[r['subject_id']][r['gene']]=r
+ common=[v for v in by_subject.values() if all(g.upper() in v and v[g.upper()]['evaluable']==1 for g in genes)]
+ fig,axes=plt.subplots(1,2,figsize=(12,5),constrained_layout=True)
+ for j,g in enumerate(genes):
+  vals=[int(r['depth']) for r in rows if r['gene']==g.upper() and r['depth']!='']
+  if vals:
+   axes[0].boxplot([vals],positions=[j],widths=.5,showfliers=False,patch_artist=True,boxprops=dict(facecolor=colors[g],alpha=.6),medianprops=dict(color='black'))
+   axes[0].scatter([j]*len(vals),vals,s=9,alpha=.3,color=colors[g])
+  total=sum(r['gene']==g.upper() for r in rows); available=sum(r['gene']==g.upper() and r['evaluable']==1 for r in rows)
+  axes[0].text(j,1.02,f'n={len(vals)}',ha='center',transform=axes[0].get_xaxis_transform(),fontsize=8)
+  axes[1].bar(j,100*available/total if total else 0,color=colors[g])
+  axes[1].text(j,100*available/total+2 if total else 2,f'{available}/{total}',ha='center',fontsize=9)
+ axes[0].set_yscale('symlog',linthresh=1);axes[0].axhline(minimum,color='black',ls='--',lw=1,label=f'Coverage threshold = {minimum}');axes[0].legend(fontsize=8)
+ axes[0].set_xticks(range(4));axes[0].set_xticklabels([g.upper() for g in genes]);axes[0].set_ylabel('Selected junction reads (cryptic + canonical)');axes[0].set_title('Event coverage; all pathology categories')
+ axes[1].set_xticks(range(4));axes[1].set_xticklabels([g.upper() for g in genes]);axes[1].set_ylim(0,115);axes[1].set_ylabel('Selected subjects evaluable (%)');axes[1].set_title('At least '+str(minimum)+' junction reads')
+ fig.suptitle(tissue+' | '+cell+' — event coverage');fig.savefig(out/f'{tissue}_{cell}_event_coverage.png',dpi=170);plt.close(fig)
+ fig,ax=plt.subplots(figsize=(10,5),constrained_layout=True);width=.18
+ for j,g in enumerate(genes):
+  for i,cat in enumerate(cats):
+   group=[v for v in common if v[g.upper()]['category']==cat]; n=len(group); k=sum(v[g.upper()]['detected_2_reads']==1 for v in group)
+   rate,lo,hi=binom(k,n)
+   paired.append(dict(tissue=tissue,cell_type=cell,category=cat,gene=g.upper(),n_common=n,detected=k,rate=rate,ci_low=lo,ci_high=hi))
+   if n:
+    x=i+(j-1.5)*width;ax.bar(x,rate*100,width,color=colors[g]);ax.errorbar([x],[rate*100],yerr=[[100*(rate-lo)],[100*(hi-rate)]],fmt='none',ecolor='black',capsize=2,lw=.8);ax.annotate(f'{k}/{n}',(x,rate*100),xytext=(0,3),textcoords='offset points',ha='center',fontsize=7)
+ from matplotlib.patches import Patch
+ ax.legend(handles=[Patch(color=colors[g],label=g.upper()) for g in genes],frameon=False,ncol=4,loc='upper center',bbox_to_anchor=(.5,-.17))
+ ax.set_xticks(range(4));ax.set_xticklabels(cats);ax.set_ylim(0,115);ax.set_ylabel('Subjects with detected cryptic junction (%)');ax.set_xlabel(cell.title()+' pTDP-43 inclusions');ax.set_title(tissue+' | '+cell+' | same subjects evaluable for all four events')
+ fig.savefig(out/f'{tissue}_{cell}_ce_detection_common_subjects.png',dpi=170,bbox_inches='tight');plt.close(fig)
+write('common_subject_detection.tsv',paired,['tissue','cell_type','category','gene','n_common','detected','rate','ci_low','ci_high'])
 write('subject_selection_audit.tsv',audit,['tissue','cell_type','subject_id','sample','original_tissue','pathology_sample_id','pathology_match','category','status','candidate_samples'])
 write('subject_event_detection.tsv',individual,['tissue','cell_type','gene','subject_id','sample','original_tissue','pathology_sample_id','pathology_match','category','cryptic_reads','canonical_reads','depth','evaluable','detected_2_reads','detected_1_read'])
 write('detection_by_category.tsv',category,['tissue','cell_type','gene','threshold_reads','category','total_selected','evaluable','not_evaluable','detected','not_detected','detection_rate','ci_low','ci_high'])
