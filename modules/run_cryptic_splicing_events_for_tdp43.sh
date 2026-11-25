@@ -419,17 +419,25 @@ for tissue,cell,gene in sorted({(r['tissue'],r['cell_type'],r['gene']) for r in 
     if len(values)>=3 and len(set(values))>1 and len(set(labels))>1:
       result=spearmanr(values,labels);rho=float(result.statistic);pvalue=float(result.pvalue)
     correlation_rows.append(dict(tissue=tissue,cell_type=cell,gene=gene,measure=measure,n_selected=len(group),n_paired=len(paired),rho=rho,pvalue=pvalue,n_absent=sum(r['category']=='Absent' for r in paired),n_sparse=sum(r['category']=='Sparse' for r in paired),n_moderate=sum(r['category']=='Moderate' for r in paired),n_frequent=sum(r['category']=='Frequent' for r in paired),method='Spearman; ordinal categories; same paired samples'))
-  fig,axes=plt.subplots(1,2,figsize=(11,4.5),constrained_layout=True)
-  for ax,measure,label in zip(axes,['cryptic_fraction','cryptic_rpm'],['Cryptic junction fraction','Cryptic junction reads per million nonsecondary alignments']):
+  from matplotlib.ticker import MaxNLocator, ScalarFormatter
+  plot_rng=random.Random(43)
+  fig,axes=plt.subplots(1,2,figsize=(12,5),constrained_layout=True)
+  for ax,measure,title,label,factor in zip(axes,['cryptic_fraction','cryptic_rpm'],['Cryptic junction fraction','Cryptic junction RPM'],['Cryptic fraction (%)','Cryptic junction reads per million\nnonsecondary alignments'],[100,1]):
+    record=next(x for x in correlation_rows[-2:] if x['measure']==measure)
+    rho=record['rho']; pvalue=record['pvalue']
+    stats=f'Spearman ρ = {rho:.2f}  |  p = {pvalue:.3g}' if rho!='' and pvalue!='' else 'Spearman ρ unavailable'
+    ax.set_title(title+'\n'+stats,fontsize=11,pad=10)
     for i,cat in enumerate(categories):
-      values=[r[measure] for r in paired if r['category']==cat]
+      values=[r[measure]*factor for r in paired if r['category']==cat]
       if values:
-        ax.boxplot([values],positions=[i],widths=.5,showfliers=True,patch_artist=True,boxprops=dict(facecolor='#9bbacb'),medianprops=dict(color='black'))
-      ax.text(i,1.02,'n='+str(len(values)),transform=ax.get_xaxis_transform(),ha='center',fontsize=8)
-    if not paired: ax.text(.5,.5,'No matched mapped-read totals available',ha='center',va='center',transform=ax.transAxes,wrap=True)
-    ax.set_xticks(range(4));ax.set_xticklabels(categories,rotation=20);ax.set_xlabel(cell.title()+' pTDP-43 inclusions');ax.set_ylabel(label)
-    if measure=='cryptic_rpm': ax.set_yscale('symlog',linthresh=1)
-  fig.suptitle(tissue+' | '+cell+' | '+gene+' — same subjects for both measures')
+        ax.boxplot([values],positions=[i],widths=.5,showfliers=False,patch_artist=True,boxprops=dict(facecolor='#a7c5d5',edgecolor='#34556a'),medianprops=dict(color='#213e50'),whiskerprops=dict(color='#34556a'),capprops=dict(color='#34556a'))
+        ax.scatter([i+plot_rng.uniform(-.11,.11) for _ in values],values,s=18,color='#315d77',alpha=.5,zorder=3)
+    if not paired: ax.text(.5,.5,'No samples with both measures',ha='center',va='center',transform=ax.transAxes,wrap=True)
+    ax.set_xticks(range(4));ax.set_xticklabels([cat+'\n(n='+str(sum(r['category']==cat for r in paired))+')' for cat in categories],fontsize=9)
+    ax.set_xlabel(cell.title()+' pTDP-43 inclusions');ax.set_ylabel(label)
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=5));fmt=ScalarFormatter(useOffset=False);fmt.set_scientific(False);ax.yaxis.set_major_formatter(fmt)
+    ax.grid(axis='y',alpha=.2);ax.set_axisbelow(True)
+  fig.suptitle(tissue.replace('_',' ')+' | '+cell.title()+' | '+gene+'\nSame subjects for both measures (n='+str(len(paired))+')',fontsize=13)
   fig.savefig(out/f'{tissue}_{cell}_{gene}_psi_vs_rpm.png',dpi=170);plt.close(fig)
 write('psi_rpm_correlations.tsv',correlation_rows,['tissue','cell_type','gene','measure','n_selected','n_paired','rho','pvalue','n_absent','n_sparse','n_moderate','n_frequent','method'])
 with (out/'issues.tsv').open('w') as f:
