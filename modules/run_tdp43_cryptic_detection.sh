@@ -107,11 +107,10 @@ for tissue,cell in sorted({(r['tissue'],r['cell_type']) for r in individual}):
    axes[0].boxplot([vals],positions=[j],widths=.5,showfliers=False,patch_artist=True,boxprops=dict(facecolor=colors[g],alpha=.6),medianprops=dict(color='black'))
    axes[0].scatter([j]*len(vals),vals,s=9,alpha=.3,color=colors[g])
   total=sum(r['gene']==g.upper() for r in rows); available=sum(r['gene']==g.upper() and r['evaluable']==1 for r in rows)
-  axes[0].text(j,1.02,f'n={len(vals)}',ha='center',transform=axes[0].get_xaxis_transform(),fontsize=8)
   axes[1].bar(j,100*available/total if total else 0,color=colors[g])
   axes[1].text(j,100*available/total+2 if total else 2,f'{available}/{total}',ha='center',fontsize=9)
  axes[0].set_yscale('symlog',linthresh=1);axes[0].axhline(minimum,color='black',ls='--',lw=1,label=f'Coverage threshold = {minimum}');axes[0].legend(fontsize=8)
- axes[0].set_xticks(range(4));axes[0].set_xticklabels([g.upper() for g in genes]);axes[0].set_ylabel('Selected junction reads (cryptic + canonical)');axes[0].set_title('Event coverage; all pathology categories')
+ axes[0].set_xticks(range(4));axes[0].set_xticklabels([g.upper()+'\n(n='+str(sum(r['gene']==g.upper() and r['depth']!='' for r in rows))+')' for g in genes]);axes[0].set_ylabel('Selected junction reads (cryptic + canonical)');axes[0].set_title('Event coverage; all pathology categories')
  axes[1].set_xticks(range(4));axes[1].set_xticklabels([g.upper() for g in genes]);axes[1].set_ylim(0,115);axes[1].set_ylabel('Selected subjects evaluable (%)');axes[1].set_title('At least '+str(minimum)+' junction reads')
  fig.suptitle(tissue+' | '+cell+' — event coverage');fig.savefig(out/f'{tissue}_{cell}_event_coverage.png',dpi=170);plt.close(fig)
  fig,ax=plt.subplots(figsize=(10,5),constrained_layout=True);width=.18
