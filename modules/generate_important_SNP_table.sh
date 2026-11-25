@@ -45,7 +45,6 @@ TISSUES = ['Cortex', 'Spinal_Cord', 'Cerebellum', 'Frontal_Cortex', 'Cervical_Sp
 if os.environ['EXPERIMENT'] == 'answer_ALS':
     TISSUES = ['iPSC_Motor_Neuron']
 QTLS = ['eQTL', 'sQTL', 'cQTL', 'circ_eQTL']
-
 def result_label(q):
     return 'eQTL' if q == 'circ_eQTL' else q
 ALS_GENES = {x.upper() for x in ['ATXN1', 'ATXN2', 'HOMER1', 'C9ORF72', 'SOD1', 'FUS', 'STMN2', 'TARDBP', 'TBK1', 'UNC13A', 'ACSL5', 'ALS2', 'ANG', 'ANXA11', 'C21ORF2', 'CAV1', 'CCNF', 'CHCHD10', 'CHMP2B', 'CHRNA3', 'DAO', 'DCTN1', 'DNAJC7', 'ELP3', 'ERBB4', 'EWSR1', 'FIG4', 'GLE1', 'GLT8D1', 'HNRNPA1', 'HNRNPA2B1', 'KANK1', 'KIF5A', 'LGALSL', 'MATR3', 'MOBP', 'NEFH', 'NEK1', 'NIPA1', 'OPTN', 'PARK9', 'PFN1', 'PON1', 'PON2', 'PON3', 'PRPH', 'SARM1', 'SCFD1', 'SETX', 'SIGMAR1', 'SPG11', 'SPTLC1', 'SQSTM1', 'TAF15', 'TIA1', 'TUBA4A', 'UBQLN2', 'VAPB', 'VCP', 'WDR7']}
@@ -60,16 +59,12 @@ if 'Gene_Name' not in rbp_table.columns:
 RBP_GENES = set(rbp_table['Gene_Name'].dropna().str.strip().str.upper())
 RBP_GENES.discard('')
 significant_qtl_gene_symbols = defaultdict(set)
-
 def norm(x):
     return re.sub('[^a-z0-9]', '', str(x).lower())
-
 def strip_gene_version(x):
     return re.sub('\\.\\d+$', '', str(x))
-
 def chr_key(x):
     return re.sub('^chr', '', str(x), flags=re.I).upper()
-
 def clean_value(x):
     if x is None:
         return None
@@ -77,10 +72,8 @@ def clean_value(x):
     if not x or x.lower() in {'nan', 'na', 'none', '.', 'null'}:
         return None
     return x
-
 def clean_snp(x):
     return clean_value(x)
-
 def find_col(cols, aliases, required=False):
     lookup = {norm(c): c for c in cols}
     for a in aliases:
@@ -95,13 +88,11 @@ def find_col(cols, aliases, required=False):
     if required:
         raise RuntimeError(f'Could not find any of {aliases}; columns={list(cols)}')
     return None
-
 def read_table(path):
     try:
         return pd.read_csv(path, sep='\t', dtype=str, low_memory=False)
     except Exception:
         return pd.read_csv(path, sep='\\s+', dtype=str, engine='python')
-
 def parse_gtf_attrs(s):
     out = {}
     for item in str(s).strip().split(';'):
@@ -112,7 +103,6 @@ def parse_gtf_attrs(s):
         if len(parts) == 2:
             out[parts[0]] = parts[1].strip().strip('"')
     return out
-
 def parse_event_coordinates(event):
     """
     Supported event formats:
@@ -171,7 +161,6 @@ with open(GTF) as f:
 for chrom in GENES_BY_CHR:
     GENES_BY_CHR[chrom].sort(key=lambda g: (g['start'], g['end']))
 print(f'Loaded {sum((len(v) for v in GENES_BY_CHR.values())):,} GENCODE genes', flush=True)
-
 def genes_for_trait(trait, qtl_type):
     """
     Return GENCODE genes associated with a QTL trait.
@@ -219,7 +208,6 @@ pos_col = find_col(gwas.columns, ['base_pair_location', 'position', 'pos', 'bp']
 gwas['SNP'] = gwas[snp_col].map(clean_snp)
 gwas = gwas[gwas['SNP'].notna()].drop_duplicates('SNP').copy()
 out = pd.DataFrame({'SNP': gwas['SNP']})
-
 def copy_gwas(col, new_name):
     if col:
         out[new_name] = gwas[col].values
@@ -240,7 +228,6 @@ print(f"GWAS p<0.05: {int(out['GWAS_sig'].sum()):,}", flush=True)
 gene_symbols = defaultdict(set)
 gene_ids = defaultdict(set)
 gene_pairs = defaultdict(set)
-
 def add_gene(snp, g):
     symbol = clean_value(g.get('gene_symbol'))
     gid = clean_value(g.get('gene_id'))
@@ -376,7 +363,6 @@ for tissue in TISSUES:
                         out.at[snp, f'{q}_HEIDI_pass'] = True
                 except Exception:
                     pass
-# AnswerALS uses explicit schemas; TargetALS retains the legacy reader below.
 def import_answer_coloc():
     audit_rows, locus_rows = [], []
     def number(v):
@@ -398,7 +384,6 @@ def import_answer_coloc():
         key = str(int(float(idx)))
         if key in sets and hit in sets[key]:
             return key, sets[key]
-        # Exported set numbers can differ from the original SuSiE component IDs.
         matches = [(k, v) for k, v in sets.items() if hit in v]
         if len(matches) != 1:
             raise ValueError(f'Cannot uniquely map signal idx={idx}, hit={hit} to exported credible sets')
@@ -415,7 +400,6 @@ def import_answer_coloc():
         summary = summary[summary.tissue.isin(TISSUES)].copy()
         if summary.duplicated(['tissue',trait_col]).any():
             raise ValueError(f'Duplicate locus summaries: {summary_file}')
-        # Use completed task summaries to locate array outputs without mixing runs.
         array_index = defaultdict(list)
         run_parent = ROOT / 'MR' / f'{q}_SuSiE_coloc_runs'
         override = os.environ.get(f'{q.upper()}_COLOC_RUN_ROOT')
@@ -429,6 +413,15 @@ def import_answer_coloc():
                     array_index[(r['tissue'],r[trait_col])].append((run/'task_outputs'/sf.stem/r['tissue'],number(r.get('max_PP_H4'))))
         pip_col = {'eQTL':'eqtl_pip','sQTL':'sqtl_pip','cQTL':'cqtl_pip','circ_eQTL':'eqtl_pip'}[q]
         cs_name = {'eQTL':'eQTL','sQTL':'sQTL','cQTL':'cQTL','circ_eQTL':'eQTL'}[q]+'_credible_sets.tsv'
+        eqtl_dirs = defaultdict(list)
+        if q == 'eQTL':
+            for tissue in TISSUES:
+                parent = ROOT/tissue/'MR'/f'{q}_SuSiE_coloc'
+                if parent.is_dir():
+                    for directory in parent.iterdir():
+                        if directory.is_dir():
+                            for gid in set(re.findall(r'ENSG[0-9]+(?:\.[0-9]+)?',directory.name)):
+                                eqtl_dirs[(tissue,gid)].append(directory)
         n_positive = 0
         for rec in summary.to_dict('records'):
             tissue, trait = rec['tissue'],rec[trait_col]
@@ -444,10 +437,17 @@ def import_answer_coloc():
                     candidates.append(directory/safe)
             if not entries:
                 old = ROOT/tissue/'MR'/f'{q}_SuSiE_coloc'
-                candidates = list(old.glob(trait+'__*')) if q=='eQTL' else [old/safe]
+                if q == 'eQTL':
+                    candidates = list(eqtl_dirs.get((tissue,trait),[]))
+                    if not candidates:
+                        base = strip_gene_version(trait)
+                        candidates = [d for (t,gid),dirs in eqtl_dirs.items()
+                                      if t==tissue and strip_gene_version(gid)==base for d in dirs]
+                else:
+                    candidates = [old/safe]
             candidates = [p for p in candidates if (p/'PIP.tsv').is_file()]
             if len(candidates)!=1:
-                raise ValueError(f'{q} {trait}: expected one detail directory, found {len(candidates)}; choose a run with {q.upper()}_COLOC_RUN_ROOT if needed')
+                raise ValueError(f'{q} {trait}: expected one detail directory, found {len(candidates)}; searched tissue folder and matching array task summaries; choose {q.upper()}_COLOC_RUN_ROOT only for an array run')
             detail = candidates[0]
             pip = read_table(detail/'PIP.tsv')
             if not {'snp',pip_col}.issubset(pip):
@@ -489,7 +489,6 @@ def import_answer_coloc():
         print(f'AnswerALS {q}: {n_positive} loci with PP.H4 >= 0.8 imported from completed summary',flush=True)
     pd.DataFrame(audit_rows,columns=['qtl_type','tissue','trait','PP_H4','idx1','idx2','qtl_set','gwas_set','SNP','status','detail_dir']).to_csv(OUTDIR/'ALS_coloc_SNP_link_audit.tsv',sep='\t',index=False)
     pd.DataFrame(locus_rows,columns=['qtl_type','tissue','trait','max_PP_H4','detail_dir']).to_csv(OUTDIR/'ALS_coloc_locus_audit.tsv',sep='\t',index=False)
-
 if os.environ['EXPERIMENT'] == 'answer_ALS':
     import_answer_coloc()
 else:
@@ -599,7 +598,6 @@ if config_file:
         if r['scale'] not in allowed:
             raise ValueError(f'Invalid scale for {key}: expected {allowed}')
         config[key] = (Path(r['matrix_path'].format(root=ROOT, tissue=key[0])).expanduser(), r['scale'])
-
 def selected_matrix(path, wanted):
     values = {}
     with path.open() as handle:
@@ -619,7 +617,6 @@ def selected_matrix(path, wanted):
     return (samples, values)
 jobs = []
 audit = []
-
 def audit_failure(t, q, pairs, reason):
     for (snp, trait) in pairs:
         audit.append(dict(SNP=snp, tissue=t, qtl_type=q, trait=trait, status=reason, passes=False))
@@ -769,7 +766,6 @@ out['validation_priority'] = np.select([out['GWAS_sig'] & out['any_QTL'] & out['
 front_cols = ['SNP', 'GWAS_chr', 'GWAS_pos', 'GWAS_effect_allele', 'GWAS_other_allele', 'GWAS_beta', 'GWAS_se', 'GWAS_p', 'GWAS_sig', 'candidate_gene_symbols', 'candidate_gene_ids', 'candidate_genes']
 remaining = [c for c in out.columns if c not in front_cols]
 out = out[front_cols + remaining]
-
 def describe_snp_evidence(categories):
     labels = {'GWAS_sig': 'GWAS p<0.05', 'ALS_relevant_gene': 'ALS gene target', 'NEUROLOGY_relevant_gene': 'Neurology gene target', 'RNA_binding_protein': 'RBP target', 'large_genotype_difference': 'Large genotype difference', 'SCREEN_regulatory_overlap': 'SCREEN regulatory overlap'}
     for q in QTLS:
@@ -823,7 +819,6 @@ for tissue in TISSUES:
 manifest_columns = ['SNP', 'trait', 'tissue', 'qtl_type', 'validation_priority', 'FDR', 'gene_symbols', 'SNP_evidence']
 pd.DataFrame(manifest_rows, columns=manifest_columns).drop_duplicates(['SNP', 'trait', 'tissue', 'qtl_type']).to_csv(OUTDIR / 'HIGH_MEDIUM_plot_manifest.tsv', sep='\t', index=False)
 print(f"Manifest: {OUTDIR / 'HIGH_MEDIUM_plot_manifest.tsv'}", flush=True)
-
 def write_trait_summary(pairs, evidence, destination):
     fields = ['gene', 'qtl_types', 'tissues', 'n_unique_significant_SNPs', 'n_HIGH_MEDIUM_SNPs', 'n_traits', 'eQTL_traits', 'sQTL_traits', 'cQTL_traits', 'circ_eQTL_traits', 'HIGH_MEDIUM_SNPs', 'SNP_trait_associations', 'lead_SNP', 'lead_evidence_count', 'lead_GWAS_p', 'lead_reason', 'HIGH_MEDIUM_SNP_evidence', 'all_significant_SNPs'] + ['n_SNPs_with_' + c for c in score_cols]
     expanded = []
