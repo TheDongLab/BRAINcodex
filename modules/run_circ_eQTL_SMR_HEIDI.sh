@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=circ_eQTL_SMR_HEIDI
-#SBATCH --output=/home/zw529/donglab/data/target_ALS/MR/circ_eQTL_SMR_HEIDI_5e8.out
-#SBATCH --error=/home/zw529/donglab/data/target_ALS/MR/circ_eQTL_SMR_HEIDI_5e8.err
+#SBATCH --output=/home/zw529/donglab/data/answer_ALS/MR/circ_eQTL_SMR_HEIDI_5e8.out
+#SBATCH --error=/home/zw529/donglab/data/answer_ALS/MR/circ_eQTL_SMR_HEIDI_5e8.err
 #SBATCH --time=1:30:00
 #SBATCH --mem=56G
 #SBATCH --cpus-per-task=4
@@ -138,20 +138,22 @@ expr=pd.read_csv(exprf,sep="\t",usecols=[0],dtype=str)
 expr_ids=set(expr.iloc[:,0])
 coords={}
 import re
+def chrom_key(value):
+    return re.sub(r"^chr", "", str(value).strip(), flags=re.I).upper()
 for r in g.itertuples(index=False):
     match=re.fullmatch(r"([^:]+):(\d+)-(\d+):([+-])",r.geneid)
     if not match: raise RuntimeError(f"{T}: malformed circ ID: {r.geneid}")
     chrom,start,end,strand=match.groups()
-    if (r.chr,int(r.left),int(r.right)) != (chrom,int(start)+1,int(end)):
+    if (chrom_key(r.chr),int(r.left),int(r.right)) != (chrom_key(chrom),int(start)+1,int(end)):
         raise RuntimeError(f"{T}: circ ID/one-based location mismatch: {r.geneid}")
-    coords[r.geneid]=(r.chr,int(r.left),int(r.right))
+    coords[r.geneid]=(chrom_key(r.chr),int(r.left),int(r.right))
 traits=pd.read_csv(fullf,sep="\t",usecols=["geneid","gene_chr","gene_start","gene_end"],dtype=str).drop_duplicates()
 trait_map={}
 for r in traits.itertuples(index=False):
     cid=r.geneid
     if cid not in expr_ids or cid not in coords:
         raise RuntimeError(f"{T}: result circ ID absent from phenotype/locations: {cid}")
-    if (r.gene_chr,int(r.gene_start),int(r.gene_end)) != coords[cid]:
+    if (chrom_key(r.gene_chr),int(r.gene_start),int(r.gene_end)) != coords[cid]:
         raise RuntimeError(f"{T}: result/feature coordinate mismatch: {cid}")
     trait_map[(cid,r.gene_chr,r.gene_start,r.gene_end)]=cid
 print(f"{T}: preserving {len(trait_map):,} circRNA probe identities")
